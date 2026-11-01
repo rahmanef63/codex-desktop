@@ -2,7 +2,7 @@
 ########## codex-clone-placeholder ##########
 
 === codex-clone-placeholder quick test ===
-commit: 14fda46
+commit: 6369114
 branch: main
 
 [1/5] static gates
@@ -11,7 +11,7 @@ branch: main
   PASS  tsc -p src/convex
 
 [2/5] unit tests
-  PASS  vitest Tests  159 passed
+  PASS  vitest Tests  179 passed
 
 [3/5] build
   PASS  bun run build
@@ -64,6 +64,7 @@ note: the mcp probe needs the echo server in the 9router profile:
   PASS  artifact html (on disk) fragment content confirmed
   PASS  parallel tools         verified
   PASS  sub-agents             verified
+  PASS  images (CLI -i)        6-char pixel marker read back
   PASS  web search             verified
   PASS  clock                  verified
   SKIP  browser (in-app)       blocked: needs an app host pipe; CLI has none
@@ -79,12 +80,13 @@ note: the mcp probe needs the echo server in the 9router profile:
   PASS  artifact html (on disk) fragment content confirmed
   PASS  parallel tools         verified
   PASS  sub-agents             verified
+  PASS  images (CLI -i)        6-char pixel marker read back
   SKIP  web search             hosted OpenAI tool, no gateway equivalent
   SKIP  clock                  namespace tool, no gateway equivalent
   SKIP  browser (in-app)       blocked: needs an app host pipe; CLI has none
   SKIP  computer use           blocked: per-app approval happens in the ChatGPT UI
 
-=== 20 passed, 0 failed ===
+=== 22 passed, 0 failed ===
 
 ########## verdict ##########
   clone : ok

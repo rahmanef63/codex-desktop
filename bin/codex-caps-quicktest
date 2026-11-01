@@ -16,7 +16,8 @@ WORKDIR="${WORKDIR:-C:\\Users\\rahma\\Documents\\probe}"
 WORKDIR_WSL="${WORKDIR_WSL:-/mnt/c/Users/rahma/Documents/probe}"
 # Rollouts, read after a probe to find out what the model actually did.
 SESSION_DIR_WSL="${SESSION_DIR_WSL:-/mnt/c/Users/rahma/.codex-clone/sessions}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" 2>/dev/null && pwd)"
+[ -d "$SCRIPT_DIR" ] || SCRIPT_DIR="/home/rahman/projects/manef/codex-desktop/scripts"
 # The 9router probes run against their own home. Without this every probe appended a rollout
 # to the real ChatGPT account's history: measured 2026-11-01, 209 -> 306 files in one session.
 # The chatgpt side cannot be isolated — it needs that home's auth.json — so it stays put.

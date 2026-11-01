@@ -55,7 +55,7 @@ if npx eslint . >/dev/null 2>&1; then ok "eslint"; else bad "eslint"; fi
 if npx tsc --noEmit -p src/convex >/dev/null 2>&1; then ok "tsc -p src/convex"; else bad "tsc -p src/convex"; fi
 
 printf '\n[2/5] unit tests\n'
-if npx vitest run --reporter=dot >/tmp/clone-unit.log 2>&1; then
+if CONVEX_URL="${CONVEX_URL:-http://127.0.0.1:9999}" npx vitest run --reporter=dot >/tmp/clone-unit.log 2>&1; then
 	ok "vitest $(grep -oE 'Tests +[0-9]+ passed' /tmp/clone-unit.log | head -1)"
 else
 	bad "vitest"
@@ -64,7 +64,7 @@ fi
 
 printf '\n[3/5] build\n'
 if [ "${1:-}" != "--no-build" ]; then
-	if bun run build >/tmp/clone-build.log 2>&1; then ok "bun run build"; else
+	if DEPLOY_TARGET=node bun run build >/tmp/clone-build.log 2>&1; then ok "bun run build"; else
 		bad "bun run build"
 		tail -20 /tmp/clone-build.log
 	fi
