@@ -15,7 +15,7 @@ Terakhir diperbarui: 2026-11-01, setelah `qcheck` penuh (5h).
 | Clone dijalankan setelah swap | ✅ **terverifikasi** — 11 sesi di home clone, model default `cx/gpt-6.1-sol` |
 | Tool calling di 9router | ✅ exec, apply_patch, MCP, parallel |
 | Sub-agent di 9router | ✅ pakai `cx/gpt-6.1-sol` |
-| Gambar/screenshot di 9router | ⚠️ hanya `cx/*`; di `ctx/*` model berganti ke kimi + base64 jadi teks (5f) |
+| Gambar/screenshot di 9router | ⚠️ hanya `cx/*`; `ctx/*` **tidak stabil** (1/3 run menjawab, sisanya berhenti tanpa jawaban). Mekanisme lama — swap ke kimi + base64 jadi teks — **tidak tereproduksi** (5i) |
 | `Access is denied` plugin cache | ✅ **selesai** — `chrome@openai-bundled` dimatikan di clone (5g) |
 | Browser in-app | ⛔ tak ada app host |
 | Computer use | ⛔ butuh allowlist per-app di UI |
@@ -414,6 +414,13 @@ tersisa hanya banner kosmetik yang menguji lapisan yang memang tak dipakai.
 
 ## 5f. Gambar lewat gateway non-OpenAI — akar "prompt too long" (2026-11-01)
 
+> Koreksi 2026-11-01 malam. Isi bagian ini **dipertahankan sebagai catatan sejarah**, bukan
+> sebagai fakta terkini. Dua klaim intinya — model diganti ke `kimi-k2.7-code` dan base64
+> ditokenisasi sebagai teks — **tidak tereproduksi** dan sudah dibatalkan di **5i**. Yang bertahan
+> dari bagian ini hanyalah angkanya: `cx` ~17,2k token, 11 gambar/12,5 MB → 30.361 token.
+> Kesimpulan praktisnya juga bertahan — **pakai `cx/*` untuk gambar** — tapi alasannya
+> instabilitas `ctx/*`, bukan penukaran model. Jangan kutip mekanisme di bawah tanpa 5i.
+
 Ini **bukan** context window dan **bukan** banner sandbox. Dua error `prompt too long` yang
 muncul sesudah deepseek jadi default punya satu sebab: gambar di jalur translasi non-OpenAI.
 
@@ -427,7 +434,7 @@ muncul sesudah deepseek jadi default punya satu sebab: gambar di jalur translasi
 Angkanya pas: 7,82 MB base64 ÷ 3,11 char/token = 2,63 juta token, sama dengan
 `exceeded max context length by 1633305 tokens` + window 1.000.000.
 
-### Temuan yang lebih penting: model DIGANTI diam-diam
+### Temuan yang lebih penting: model DIGANTI diam-diam — **DIBATALKAN, lihat 5i**
 
 Uji langsung ke `router.antinrml.com/v1/responses`, request identik, hanya beda ada/tidaknya
 gambar:
@@ -441,6 +448,10 @@ output_tokens = 0, output = []
 Konsisten di semua bentuk payload (gambar di `message`, di `custom_tool_call_output`,
 `detail` = original/high/auto/low). Combo `ctx/conextlab/...` melakukan failover ke kimi saat
 ada gambar, dan di jalur translator gambar kehilangan bentuknya.
+
+> **Dibatalkan 5i:** pada 2026-11-01 malam, `kimi` muncul **0 kali** di rollout probe 3 run,
+> `model = ctx/...` bertahan, tidak ada error prompt-too-long, dan `input_image` ada. Blok di atas
+> adalah pengamatan satu sesi yang tidak berulang, bukan mekanisme gateway.
 
 Gateway **tidak** salah menangani gambar sebagai gambar: 11 gambar (12,5 MB) lewat jalur yang
 benar menghasilkan 30.361 token. Jadi tokenisasi gambar sehat; yang rusak adalah pemilihan

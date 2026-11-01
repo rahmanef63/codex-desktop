@@ -207,12 +207,13 @@ if ($Mode -eq 'clone') {
 
     # Same story for the model: a UI pick rewrites `model` to a slug nine_router cannot
     # serve. Pin the pair the profile was measured with.
-    # Default clone model = cx/gpt-6.1-sol, the only catalog entry whose image path works.
-    # Measured 2026-11-01: sending a screenshot to a non-OpenAI upstream through this
-    # gateway silently SWAPS the upstream to kimi-k2.7-code:cloud and tokenises the image
-    # base64 as TEXT (~87x the real cost), which is what "exceeded max context length by
-    # 1633305 tokens" was. cx keeps input_image intact. Sub-agents also work here, unlike
-    # the ctx/* entries, whose collaboration namespace the gateway flattens.
+    # Default clone model = cx/gpt-6.1-sol, the only catalog entry whose image path is stable.
+    # Measured 2026-11-01: images on a non-OpenAI upstream are UNSTABLE. cx answered 3/3 at
+    # ~17.3k tokens; ctx/* answered 1/3, failures ending with no answer at all (view_image then
+    # quit, or a 256k-token loop). An earlier revision of this comment blamed a silent swap to
+    # kimi-k2.7-code plus text-tokenised base64; that did not reproduce (PROGRESS 5i). cx keeps
+    # input_image intact. Sub-agents also work here, unlike the ctx/* entries, whose
+    # collaboration namespace the gateway flattens.
     Set-CloneModel $targetConfig 'cx/gpt-6.1-sol' 'nine_router'
 
     # Catalog: the clone must read its own copy, not the real home's.

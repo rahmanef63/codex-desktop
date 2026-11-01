@@ -11,6 +11,8 @@ $W = 1093
 $H = 6000
 # A marker that cannot be guessed from the filename and cannot be recovered from base64
 # that was tokenised as text: six random characters drawn as pixels.
+# (The "tokenised as text" failure did not reproduce; PROGRESS 5i. The random marker is still
+# worth it — body text would be readable from a degraded path.)
 if (-not $Text) {
     $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
     $Text = -join (1..6 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
