@@ -7,6 +7,22 @@
 9router.config.toml
 auth.json
 
+# MSO runtime state — never commit.
+# `.mso/` holds account.json, config.json, private/, agent-session-archive/ and 3.5k files of
+# local orchestration state. It is machine-local by design; committing it would publish
+# credentials and session history.
+.mso/
+mso.local/
+*.mso.local
+
+# Local activity log
+.local-logs/
+
+# Progress and working notes that must stay off the repo
+progress.local.md
+PROGRESS.local.md
+*.progress.local.*
+
 # Machine-local artifacts
 *.log
 *.sqlite
