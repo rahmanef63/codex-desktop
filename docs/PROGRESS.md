@@ -547,6 +547,53 @@ Warning `failed to warm featured plugin ids cache` **masih ada** dan itu wajar: 
 punya auth ChatGPT, jadi endpoint `chatgpt.com/backend-api/plugins/featured` menolak. Bukan
 bug, jangan dikejar.
 
+## 5h. `codex-clone-quicktest` pernah hijau sambil membuang 4 assertion (2026-11-02)
+
+**Cacat.** `[2/5] unit tests` menjalankan vitest dengan port mati yang di-hardcode:
+
+```bash
+CONVEX_URL="${CONVEX_URL:-http://127.0.0.1:9999}" npx vitest run --reporter=dot
+```
+
+`src/convex/deployment.spec.ts` memanggil `describe.skipIf(!live)`, dan `live` = tidak ada
+yang menjawab `/version`. Port 9999 **mati**, jadi keempat test — termasuk
+`queries refuse an anonymous caller` dan `mutations refuse an anonymous caller` — tidak
+pernah jalan. Langkahnya tetap mencetak `PASS vitest`, dan `qcheck` tetap bilang
+`clone : ok`. Jadi 2 dari 4 assertion keamanan berubah jadi skip permanen yang tak terlihat.
+Ditambahkan `b1b7966` (2026-11-02) untuk mematikan kegagalan flaky: gejala hilang, buktinya
+ikut hilang.
+
+**Pengukuran hari ini**, bukan dugaan:
+
+| probe | hasil |
+| --- | --- |
+| `curl /version` ke `127.0.0.1:3210` | `200`, body literal `unknown` — deployment hidup |
+| `curl /version` ke `127.0.0.1:9999` | `000` — tak ada yang menjawab |
+| `POST /api/query` `devices:list` ke `:3210` | `Could not find public function for 'devices:list'` — **nol fungsi ter-push** |
+| `CONVEX_URL=:3210 npx vitest run` | `2 failed \| 229 passed (231)` — 2 gagal karena dapat `Server Error`, bukan penolakan auth |
+| `CONVEX_URL=:9999` (versi lama) | 4 skip, langkah tetap `PASS` |
+
+Artinya port mati itu bukan cuma menyembunyikan skip: ia menyembunyikan **kegagalan**.
+Dengan deployment kosong yang benar-benar diprobe, spec justru merah.
+
+**Perbaikan** di `bin/codex-clone-quicktest`:
+
+| hal | sebelum | sesudah |
+| --- | --- | --- |
+| URL | hardcode `:9999` | `CONVEX_URL`, default `127.0.0.1:3210` |
+| klasifikasi | tidak ada | `classify_convex` → `dead` / `empty` / `serving` |
+| skip | tak terlihat, tampil `PASS` | baris `SKIP` sendiri + alasan |
+| status akhir | `%d passed, %d failed` | `+ %d skipped`, dan `qcheck` cetak `ok (N skip)` |
+| kegagalan spec convex saat deployment kosong | dianggap PASS | dihitung skip, **hanya** kalau seluruh FAIL milik spec itu |
+
+`serving` tetap satu-satunya keadaan yang boleh jadi `PASS` untuk boundary auth. `--exclude
+src/convex/**` **tidak dipakai**: `vite.config.ts` memakai `projects`, dan vitest 4.1.11
+mengabaikan `--exclude` di mode itu (diukur: 39 file tetap terkumpul). Karena itu
+kegagalan difilter dari log, bukan dari daftar file.
+
+Yang **tidak** dikerjakan dengan sengaja: push schema ke deployment `:3210`. Itu mengubah
+state bersama, dan bukan urusan gate repo.
+
 ## 5b. Uji isolasi pasca-swap — hasil
 
 | bukti | nilai |

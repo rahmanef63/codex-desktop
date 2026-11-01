@@ -24,10 +24,21 @@ caps_rc=0
 clone_state="skipped"
 codex_state="skipped"
 caps_state="skipped"
+clone_skips=0
+SKIP_FILE="${TMPDIR:-/tmp}/codex-clone-quicktest.skips"
 
 if [ "$run_clone" -eq 1 ]; then
 	printf '\n########## codex-clone-placeholder ##########\n'
-	if codex-clone-quicktest "$@"; then clone_state="ok"; else
+	rm -f "$SKIP_FILE"
+	if codex-clone-quicktest "$@"; then
+		# A green clone gate may still have skipped something it could not prove.
+		clone_skips=$(cat "$SKIP_FILE" 2>/dev/null || echo 0)
+		if [ "${clone_skips:-0}" -gt 0 ]; then
+			clone_state="ok ($clone_skips skip)"
+		else
+			clone_state="ok"
+		fi
+	else
 		clone_state="FAILED"
 		clone_rc=1
 	fi
