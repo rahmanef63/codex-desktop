@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Quick check that Codex Desktop actually calls tools, on both providers.
+#
+#   codex-real-quicktest            # both providers: chat, exec, MCP plugin
+#   codex-real-quicktest 9router    # only the 9router profile
+#   codex-real-quicktest chatgpt    # only the ChatGPT base config
+#
+# Why this exists: the 9router path fails silently in a specific way. Chat keeps
+# working while every tool call dies with `unsupported call`, so a passing chat
+# proves nothing. Each provider is therefore probed three times, and the MCP probe
+# is the one that catches a broken catalog.
+set -uo pipefail
+
+CODEX_EXE="${CODEX_EXE:-C:\\Users\\rahma\\AppData\\Local\\OpenAI\\Codex\\bin\\22cfb1d302613eae\\codex.exe}"
+WORKDIR="${WORKDIR:-C:\\Users\\rahma\\Documents}"
+# Never run Codex from C:\Users\rahma: ~/.codex/config.toml gets merged as project-local
+# config and silently overrides the profile under test.
+WHICH="${1:-both}"
+PASS=0
+FAIL=0
+
+ok()  { printf '  PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
+bad() { printf '  FAIL  %s\n' "$1"; FAIL=$((FAIL + 1)); }
+
+# probe <label> <expect> <profile-flag> <prompt>
+probe() {
+	local label="$1" want="$2" flag="$3" prompt="$4" out
+	out=$(powershell.exe -NoProfile -Command \
+		"& '$CODEX_EXE' $flag exec --skip-git-repo-check -C '$WORKDIR' '$prompt'" 2>&1)
+
+	if grep -qF "$want" <<<"$out"; then ok "$label"; return; fi
+
+	bad "$label  (wanted $want)"
+	# The failure modes worth naming, because they look like nothing is wrong.
+	if grep -q "unsupported call" <<<"$out"; then
+		printf '        -> tool names mangled: check tool_mode=code_mode_only and use_responses_lite=false\n'
+	elif grep -q "missing both .*base_instructions\|model_messages.instructions_template" <<<"$out"; then
+		printf '        -> catalog rejected: regenerate with codex-9router-catalog\n'
+	elif grep -q "requires approval, but approval policy is never" <<<"$out"; then
+		printf '        -> profile needs approval_policy=never and sandbox_mode=danger-full-access\n'
+	elif grep -q "Ignored unsupported project-local config keys" <<<"$out"; then
+		printf '        -> project-local config leaked: run from a directory that is not C:\\Users\\rahma\n'
+	fi
+	grep -aE "^model:|^provider:|^sandbox:" <<<"$out" | head -3 | sed 's/^/        /'
+}
+
+run_provider() {
+	local name="$1" flag="$2" probe_mcp="${3:-yes}"
+	printf '\n--- %s\n' "$name"
+	probe "$name / chat"   "PROBE-CHAT-OK"   "$flag" 'reply with exactly: PROBE-CHAT-OK'
+	probe "$name / exec"   "PROBE-EXEC-OK"   "$flag" 'run the shell command: echo PROBE-EXEC-OK'
+	if [ "$probe_mcp" = "yes" ]; then
+		probe "$name / mcp" "PLUGIN-OK: PROBE" "$flag" 'call echo_text with text=PROBE and report the exact output'
+	else
+		printf '  SKIP  %s / mcp  (no probe MCP server in the base config)\n' "$name"
+	fi
+}
+
+printf '\n=== codex real quick test ===\n'
+printf 'exe: %s\n' "$CODEX_EXE"
+
+case "$WHICH" in
+chatgpt) run_provider "chatgpt" "" no ;;
+9router) run_provider "9router" "-p 9router" ;;
+both | *)
+	run_provider "chatgpt" "" no
+	run_provider "9router" "-p 9router"
+	;;
+esac
+
+printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
+printf 'note: the mcp probe needs the echo server in the 9router profile:\n'
+printf '      ~/.local/share/codex-9router/mcp_echo.py\n'
+[ "$FAIL" -eq 0 ]

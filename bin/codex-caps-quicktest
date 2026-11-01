@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Which Codex capabilities actually execute, per provider.
+#
+#   codex-caps-quicktest            # both providers
+#   codex-caps-quicktest 9router    # one provider
+#   codex-caps-quicktest --list     # print the matrix without running anything
+#
+# Capabilities are named by what the user gets, not by tool name, because the tool
+# name is exactly what breaks on the gateway: the same `exec` custom tool arrives as
+# `functions` when the catalog is wrong.
+set -uo pipefail
+
+CODEX_EXE="${CODEX_EXE:-C:\\Users\\rahma\\AppData\\Local\\OpenAI\\Codex\\bin\\22cfb1d302613eae\\codex.exe}"
+WORKDIR="${WORKDIR:-C:\\Users\\rahma\\Documents\\probe}"
+# Same directory from inside WSL, so a probe can inspect what actually landed on disk.
+WORKDIR_WSL="${WORKDIR_WSL:-/mnt/c/Users/rahma/Documents/probe}"
+WHICH="${1:-both}"
+
+if [ "$WHICH" = "--list" ]; then
+	cat <<'EOF'
+capability         chatgpt                       9router
+-----------------  ----------------------------  ----------------------------
+chat               pass                          pass
+exec / shell       pass                          pass
+file write+read    pass                          pass
+apply_patch        pass                          pass
+artifact html      pass                          pass
+parallel tools     pass                          pass (via Promise.allSettled in exec)
+sub-agents         pass (collab: Wait)           pass on cx/gpt-6.1-sol only;
+                                                 deepseek: unsupported call
+web search         pass                          not available (hosted tool)
+clock              pass                          not available (namespace tool)
+browser (in-app)   blocked: no app host          blocked: no app host
+computer use       blocked: per-app approval     blocked: per-app approval
+EOF
+	exit 0
+fi
+
+PASS=0; FAIL=0
+ok()  { printf '  PASS  %-22s %s\n' "$1" "$2"; PASS=$((PASS + 1)); }
+bad() { printf '  FAIL  %-22s %s\n' "$1" "$2"; FAIL=$((FAIL + 1)); }
+skip(){ printf '  SKIP  %-22s %s\n' "$1" "$2"; }
+
+# probe <capability> <expect> <flag> <prompt> [skip_reason_on_fail]
+probe() {
+	local cap="$1" want="$2" flag="$3" prompt="$4" hint="${5:-}" out
+	out=$(powershell.exe -NoProfile -Command \
+		"& '$CODEX_EXE' $flag exec --sandbox workspace-write --skip-git-repo-check -C '$WORKDIR' '$prompt'" 2>&1)
+	if grep -qF "$want" <<<"$out"; then ok "$cap" "verified"; return; fi
+	bad "$cap" "${hint:-wanted $want}"
+	if grep -q "unsupported call: collaboration" <<<"$out"; then
+		printf '        -> namespace flattened: this upstream model cannot do sub-agents; use cx/gpt-6.1-sol\n'
+	elif grep -q "unsupported call" <<<"$out"; then
+		printf '        -> gateway mangled tool names (tool_mode / use_responses_lite)\n'
+	elif grep -q "no such tool\|not available\|unknown tool" <<<"$out"; then
+		printf '        -> tool not exposed by this provider\n'
+	elif grep -q "is denied" <<<"$out"; then
+		printf '        -> sandbox denied the write, not a missing tool\n'
+	fi
+}
+
+# probe2 <capability> <want1> <want2> <flag> <prompt> [hint]
+probe2() {
+	local cap="$1" want1="$2" want2="$3" flag="$4" prompt="$5" hint="${6:-}" out
+	out=$(powershell.exe -NoProfile -Command \
+		"& '$CODEX_EXE' $flag exec --sandbox workspace-write --skip-git-repo-check -C '$WORKDIR' '$prompt'" 2>&1)
+	if grep -qF "$want1" <<<"$out" && grep -qF "$want2" <<<"$out"; then ok "$cap" "verified"; return; fi
+	bad "$cap" "${hint:-wanted $want1 and $want2}"
+	if grep -q "unsupported call" <<<"$out"; then
+		printf '        -> gateway mangled tool names (tool_mode / use_responses_lite)\n'
+	elif grep -q "no such tool\|not available\|unknown tool" <<<"$out"; then
+		printf '        -> tool not exposed by this provider\n'
+	elif grep -q "is denied" <<<"$out"; then
+		printf '        -> sandbox denied the write, not a missing tool\n'
+	fi
+}
+
+# probe_re <capability> <regex> <flag> <prompt> [hint]
+# For tools that return real data (a timestamp, a version) rather than an echo of a token.
+probe_re() {
+	local cap="$1" re="$2" flag="$3" prompt="$4" hint="${5:-}" out
+	out=$(powershell.exe -NoProfile -Command \
+		"& '$CODEX_EXE' $flag exec --sandbox workspace-write --skip-git-repo-check -C '$WORKDIR' '$prompt'" 2>&1)
+	if grep -qE "$re" <<<"$out"; then ok "$cap" "verified"; return; fi
+	bad "$cap" "${hint:-no match for /$re/}"
+	if grep -q "unsupported call" <<<"$out"; then
+		printf '        -> gateway mangled tool names (tool_mode / use_responses_lite)\n'
+	fi
+}
+
+run() {
+	local name="$1" flag="$2"
+	printf '\n--- %s\n' "$name"
+
+	probe "chat"            "CAP-CHAT-OK"   "$flag" 'reply with exactly: CAP-CHAT-OK'
+	probe "exec"            "CAP-EXEC-OK"   "$flag" 'run the shell command: echo CAP-EXEC-OK'
+
+	# File write + read back: the thing an artifact actually is on disk.
+	probe "file write+read" "CAP-FILE-OK"   "$flag" \
+		"write a file named cap-probe.txt containing the exact text CAP-FILE-OK, then read it back and print it"
+
+	# apply_patch: edit an existing file, then verify the file itself. Asking the model to
+	# print the result proves the model can type, not that the patch landed.
+	probe "apply_patch"     "CAP-PATCH-OK"  "$flag" \
+		"there is a file named cap-patch.txt in the working directory containing the single line OLD; use apply_patch to change that line to CAP-PATCH-OK, then print the file content"
+	if [ "$(cat "$WORKDIR_WSL/cap-patch.txt" 2>/dev/null | tr -d '\r\n')" = "CAP-PATCH-OK" ]; then
+		ok "apply_patch (on disk)" "file content confirmed"
+	else
+		bad "apply_patch (on disk)" "file still reads: $(cat "$WORKDIR_WSL/cap-patch.txt" 2>/dev/null | tr -d '\r\n' | head -c 40)"
+	fi
+
+	# HTML artifact: a fragment written to a durable path, which is what the visualize
+	# skill produces. Nothing here needs a special tool, so both providers should pass.
+	probe "artifact html"   "cap-visual.html" "$flag" \
+		"create a file named cap-visual.html containing a small HTML fragment with a div whose text is CAP-VISUAL-OK, then confirm the path exists"
+	if grep -q "CAP-VISUAL-OK" "$WORKDIR_WSL/cap-visual.html" 2>/dev/null; then
+		ok "artifact html (on disk)" "fragment content confirmed"
+	else
+		bad "artifact html (on disk)" "file missing or empty"
+	fi
+
+	probe2 "parallel tools" "PARA-A" "PARA-B" "$flag" \
+		'using parallel tool calls, run these two shell commands at the same time: echo PARA-A and echo PARA-B, then print both outputs'
+
+	probe "sub-agents" "collab:" "$flag" \
+		'spawn a sub-agent to compute 7*6, wait for it, and print the answer'
+
+	if [ "$name" = "chatgpt" ]; then
+		# These return real data, so the probe looks for the shape of an answer, not a marker.
+		probe_re "web search" '[0-9]{1,3}\.[0-9]' "$flag" \
+			'use web search to find the current Node.js LTS major version and print just the number' \
+			"no version-like number returned"
+		probe_re "clock" '[0-9]{2}:[0-9]{2}:[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2}' "$flag" \
+			'use the clock tool to tell me the current UTC time and print it' \
+			"no timestamp returned"
+	else
+		skip "web search"  "hosted OpenAI tool, no gateway equivalent"
+		skip "clock"       "namespace tool, no gateway equivalent"
+	fi
+	skip "browser (in-app)" "blocked: needs an app host pipe; CLI has none"
+	skip "computer use"     "blocked: per-app approval happens in the ChatGPT UI"
+}
+
+printf '\n=== codex capability matrix ===\n'
+mkdir -p "$WORKDIR_WSL"
+cd "$WORKDIR_WSL" || exit 1
+printf 'OLD\n' > cap-patch.txt
+
+case "$WHICH" in
+chatgpt) run "chatgpt" "" ;;
+9router) run "9router" "-p 9router" ;;
+*)
+	run "chatgpt" ""
+	run "9router" "-p 9router"
+	;;
+esac
+
+printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

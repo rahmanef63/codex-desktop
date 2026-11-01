@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Quick feature check for the codex-clone-placeholder repo.
+#
+#   codex-clone-quicktest            # build + boot + probe endpoints + one browser smoke
+#   codex-clone-quicktest --no-build # reuse the current build
+#
+# Exits non-zero on the first failed check so it can gate a commit.
+set -uo pipefail
+cd "${REPO:-/home/rahman/projects/lara/codex-clone-placeholder}" || exit 1
+
+PORT="${PORT:-4198}"
+BASE="http://127.0.0.1:${PORT}"
+PASS=0
+FAIL=0
+PID=""
+
+cleanup() {
+	[ -n "$PID" ] && kill "$PID" 2>/dev/null
+	wait "$PID" 2>/dev/null
+}
+trap cleanup EXIT
+
+ok()   { printf '  PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()  { printf '  FAIL  %s\n' "$1"; FAIL=$((FAIL + 1)); }
+
+# check <label> <expected-substring> <curl args...>
+# An empty expected substring means "expect any real answer, not a transport error".
+check() {
+	local label="$1" want="$2"
+	shift 2
+	local got
+	got=$(curl -sS --max-time 10 "$@" 2>&1)
+	if printf '%s' "$got" | grep -q 'curl: ('; then
+		bad "$label  (transport error)"
+		printf '        got: %.160s\n' "$got"
+		return
+	fi
+	if [ -z "$want" ]; then
+		ok "$label"
+		return
+	fi
+	if printf '%s' "$got" | grep -qF "$want"; then ok "$label"; else
+		bad "$label  (wanted $want)"
+		printf '        got: %.160s\n' "$got"
+	fi
+}
+
+printf '\n=== codex-clone-placeholder quick test ===\n'
+printf 'commit: %s\n' "$(git rev-parse --short HEAD)"
+printf 'branch: %s\n\n' "$(git rev-parse --abbrev-ref HEAD)"
+
+printf '[1/5] static gates\n'
+if npx prettier --check . >/dev/null 2>&1; then ok "prettier"; else bad "prettier"; fi
+if npx eslint . >/dev/null 2>&1; then ok "eslint"; else bad "eslint"; fi
+if npx tsc --noEmit -p src/convex >/dev/null 2>&1; then ok "tsc -p src/convex"; else bad "tsc -p src/convex"; fi
+
+printf '\n[2/5] unit tests\n'
+if npx vitest run --reporter=dot >/tmp/clone-unit.log 2>&1; then
+	ok "vitest $(grep -oE 'Tests +[0-9]+ passed' /tmp/clone-unit.log | head -1)"
+else
+	bad "vitest"
+	tail -15 /tmp/clone-unit.log
+fi
+
+printf '\n[3/5] build\n'
+if [ "${1:-}" != "--no-build" ]; then
+	if bun run build >/tmp/clone-build.log 2>&1; then ok "bun run build"; else
+		bad "bun run build"
+		tail -20 /tmp/clone-build.log
+	fi
+else
+	printf '  SKIP  build (--no-build)\n'
+fi
+
+printf '\n[4/5] boot + feature probes\n'
+# Feature flags on purpose: every capability route must answer, not 404.
+AUTH_ENABLED=false \
+AI_ENABLED=false \
+MCP_CLIENT_ENABLED=false \
+MCP_SERVER_ENABLED=false \
+MCP_SERVER_TOKEN="$(printf 'x%.0s' {1..40})" \
+PUBLIC_SITE_URL="http://127.0.0.1:${PORT}" \
+PUBLIC_SEO_INDEXABLE=false \
+PORT="$PORT" HOST=127.0.0.1 \
+node build/index.js >/tmp/clone-server.log 2>&1 &
+PID=$!
+
+for _ in $(seq 1 40); do
+	curl -s -o /dev/null --max-time 1 "$BASE/" && break
+	sleep 0.25
+done
+
+if curl -s -o /dev/null --max-time 2 "$BASE/"; then ok "server booted on :$PORT"; else
+	bad "server booted on :$PORT"
+	tail -20 /tmp/clone-server.log
+fi
+
+# The shell: menubar landmark is server-rendered; the composer heading is hydrated
+# client-side, so asserting its text on raw HTML would be wrong. Playwright covers that.
+check "shell renders (menubar)"      "Workspace menu"  "$BASE/"
+check "shell hydrates (Svelte boot)" "__sveltekit"     "$BASE/"
+
+# Capability surface must report state, not 404.
+check "GET /api/ai/config"           '"ai"'            "$BASE/api/ai/config"
+check "GET /api/mcp/server (POST-only)" "" -X POST "$BASE/api/mcp/server" \
+	-H 'Content-Type: application/json' -d '{}'
+check "GET /robots.txt"              "User-agent"      "$BASE/robots.txt"
+check "GET /sitemap.xml"             "<urlset"         "$BASE/sitemap.xml"
+
+# A disabled capability must say so rather than pretend.
+check "disabled AI chat refuses"     "" -X POST "$BASE/api/ai/chat" \
+	-H 'Content-Type: application/json' -d '{}'
+
+printf '\n[5/5] browser smoke (desktop viewport)\n'
+if npx playwright test --config playwright.dev.config.ts --reporter=line >/tmp/clone-e2e.log 2>&1; then
+	ok "playwright dev-smoke $(grep -oE '[0-9]+ passed' /tmp/clone-e2e.log | head -1)"
+else
+	bad "playwright dev-smoke"
+	tail -20 /tmp/clone-e2e.log
+fi
+
+printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

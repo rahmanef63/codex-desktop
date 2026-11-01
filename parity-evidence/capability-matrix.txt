@@ -1,0 +1,215 @@
+Capability matrix — parallel tools, sub-agents, browser in-app, computer use
+================================================================================
+Measured 2026-10-31, OpenAI.Codex 26.1027.3384.0. Re-verified after the 9router
+profile default changed from deepseek-v4.1-flash-free to cx/gpt-6.1-sol.
+
+  capability        chatgpt                 9router
+  ----------------  ----------------------  --------------------------------
+  parallel tools    PASS                    PASS (Promise.allSettled in exec)
+  sub-agents        PASS (collab: Wait)     PASS on cx/gpt-6.1-sol only
+                                            deepseek: unsupported call
+  browser in-app    BLOCKED, no app host    BLOCKED, no app host
+  computer use      BLOCKED, per-app        BLOCKED, per-app approval
+
+
+SUB-AGENTS: root cause, proven
+------------------------------
+Not a client bug and not a refusal of namespaces from third-party providers.
+The gateway's Responses to Chat-Completions translator collapses the whole
+namespace into ONE opaque function before the model sees it.
+
+Captured request body, gateway side, members intact (6 of them):
+
+  {"type":"namespace","name":"collaboration",
+   "description":"Tools for spawning and managing sub-agents.",
+   "tools":[{"type":"function","name":"followup_task",...},
+            {"type":"function","name":"interrupt_agent",...},
+            {"type":"function","name":"list_agents",...},
+            {"type":"function","name":"send_message",...},
+            {"type":"function","name":"spawn_agent",...},
+            {"type":"function","name":"wait_agent",...}]}
+
+  tool_choice: "auto" — no restriction. Not the cause.
+
+Synthetic-namespace test settles it. A namespace with one unique member name
+that cannot be guessed, given to three upstreams on the same gateway:
+
+  ag/claude-opus-5-5   "zzprobe is a single tool, not a namespace"
+  ag/gemini-3.8-flash  "namespace zzprobe does not contain a member tool zz_echo"
+  cx/gpt-6.1-sol       "Yes, namespace zzprobe contains zz_echo; required zz_token"
+
+So OpenAI-native upstreams pass the namespace through untouched; translated ones
+receive a flattened single function. The flattening happens in
+open-sse/translator/request/openai-responses.js around line 183: the `namespace`
+tool type has a `name` but no `tools` branch, so it falls through to the plain
+function path with an empty parameter schema. The empty schema is then filled by
+formats/gemini.js (addPlaceholders), producing the observed
+arguments {"reason":"..."} — the same payload the router logs as
+`unsupported call: collaboration`.
+
+Client acceptance matrix, mock server, catalog unchanged:
+  name=spawn_agent + namespace=collaboration   accepted
+  name=spawn_agent alone                       unsupported call: spawn_agent
+  name=collaboration.spawn_agent               unsupported call: ...
+  name=collaboration                           unsupported call: collaboration
+
+Removing multi_agent_version from the catalog drops the namespace entirely, which
+disables sub-agents but does not fix translation. Not a fix.
+
+
+SUB-AGENTS: the fix that works today
+------------------------------------
+Point the 9router profile at an OpenAI-native upstream. Done: the profile default
+is now cx/gpt-6.1-sol. Verified on the real profile, five probes green:
+
+  chat 16,878 tok | exec 17,114 | MCP 17,435 | sub-agent 17,369 | visual 17,224
+  sub-agent output: collab: Wait -> 42
+  zero "unrecognized configuration settings" warnings
+
+Cost note, identical trivial exec task:
+  cx/gpt-6.1-sol            14.7k tokens
+  deepseek-v4.1-flash-free  25.0k tokens
+  deepseek sub-agent attempt 38.6k tokens, and it failed
+
+deepseek leaks raw chain-of-thought into stdout in non-interactive mode, which is
+where the token difference comes from. Caveat: token count is not dollars, and
+deepseek-v4.1-flash-free is the free tier. deepseek stays valid for exec/chat.
+
+Gateway-side fix, for whoever owns those files — one file, two directions:
+  1. request path, openai-responses.js ~line 183: add a branch for
+     type==="namespace" that flattens members to `<ns>.<member>` function names
+     and records the mapping. Strip `encrypted` from member parameter schemas —
+     Gemini rejects it with Unknown name "encrypted".
+  2. response path, response/openai-responses.js ~line 467: when a name is in that
+     mapping, emit name=<member> plus a "namespace": <ns> field and drop the
+     prefix. Both `collaboration.spawn_agent` and a bare `spawn_agent` fail the
+     client router; the namespace field is mandatory.
+  A full passthrough already exists for the Codex executor
+  (open-sse/executors/codex.js:78-86); the other paths never got the equivalent.
+
+
+PARALLEL TOOLS
+--------------
+Both providers run two shell commands concurrently and return both outputs.
+ChatGPT uses multi_tool_use.parallel. 9router cannot: the model reaches for
+Promise.allSettled inside the exec custom tool instead. Same observable result,
+different route. multi_tool_use.parallel is app-side and never reaches the gateway.
+
+
+BROWSER IN-APP
+--------------
+Both providers: The browser access host is unavailable. Correct answer, not a
+defect. The in-app browser is served by the ChatGPT app process over a local pipe;
+a CLI exec run has no such pipe. The app runs (9 ChatGPT processes), the plugin is
+enabled, and ~/.codex/browser/config.toml shows full_cdp_access_enabled = true
+with approval_mode = "never_ask". What is missing here: `mso doctor` reports
+"app dashboards (off: no app host)". Verification needs the ChatGPT window.
+
+
+COMPUTER USE
+------------
+CUA is alive and reaches the approval gate, then is refused per application:
+
+  Automatic approval review rejected the Chrome capture because
+  Computer Use was not approved for Google Chrome.
+  Automatic approval review rejected the Notepad launch:
+  "Computer Use was not approved to use Notepad."
+
+Runtime, the @oai/sky import and window capture all work. What is missing is a
+per-app allowlist, decided in the ChatGPT UI. No config surface exists for it.
+This build captures individual windows only: no full-desktop capture and no
+foreground-window indicator.
+
+
+SANDBOX INTERACTION (regression trap)
+-------------------------------------
+`--sandbox workspace-write` KILLS MCP. Every MCP call then fails with
+"MCP tool call requires approval, but approval policy is never". The profile's
+sandbox_mode = "danger-full-access" is what makes MCP work; do not override it
+per-run while testing plugins.
+
+Also: include_*_usage_instructions and web_search_tool_type are per-model catalog
+fields, not config. Setting them in the profile is silently ignored ("Codex is
+ignoring 4 unrecognized configuration settings"). Removed; the catalog carries them.
+
+IMAGES / SCREENSHOTS ON THE GATEWAY (2026-11-01)
+-------------------------------------------------
+Sending an image to a NON-OpenAI upstream through this gateway is broken in two
+ways at once, and both are silent:
+
+ 1. The upstream is SWAPPED. A request to ctx/conextlab/...deepseek-v4.1-flash:cloud
+    that contains an image comes back with model = kimi-k2.7-code:cloud,
+    output_tokens = 0 and an empty output array. Without the image the same request
+    stays on deepseek. Measured on /v1/responses, identical payloads.
+ 2. The image is FLATTENED TO TEXT. 7.82 MB of base64 / 3.11 chars-per-token =
+    2.63M tokens, which is what "exceeded max context length by 1633305 tokens"
+    actually meant. Window was 1,000,000 and not the cause.
+
+  cx/gpt-6.1-sol is the only catalog entry whose image path works:
+    same 2.3 MB desktop-full.png (1093x6000) -> 17,274 tokens, and the model really
+    saw it: "A sleek black-and-white AICO learning website ..."
+  The gateway tokenises images correctly when the shape survives: 11 images
+  (12.5 MB base64) -> 30,361 tokens. So image handling is fine; upstream selection
+  and the Responses->Chat translation are not.
+
+  trigger  a full-page screenshot. desktop-full.png at 1093x6000 px, 2.3 MB, 3.03 MB
+           as base64; that session carried 11 of them, 7.82 MB total.
+  verdict  use cx/* for anything with a screenshot. Keep ctx/* for text-only, where
+           it is still fine and cheaper.
+  fix      belongs in open-sse: do not fail over to a vision-less upstream, and keep
+           input_image intact through translation. Out of scope here; debugging
+           deferred by Rahman on 2026-11-01.
+
+PLUGIN CACHE "Access is denied" (2026-11-01)
+-------------------------------------------
+Every clone start logged:
+  failed to refresh plugin cache for chrome@openai-bundled:
+  failed to back up plugin cache entry: Access is denied. (os error 5)
+
+  cause   chrome@openai-bundled was enabled in the clone config, so Chrome launched
+          extension-host.exe from INSIDE plugins\cache\openai-bundled\chrome\latest.
+          Windows then locks that one file, and the app's pre-refresh backup of the
+          cache entry cannot rename the folder: os error 5. Not an ACL problem —
+          .codex and .codex-clone have identical ACEs, and chrome/latest renames fine
+          on its own. Real home: 0 occurrences. Clone: 15.
+  fix     enabled = false for chrome@openai-bundled in the CLONE config only; the real
+          account keeps it on. The launcher re-asserts it via Set-ClonePluginDisabled
+          and stops any extension-host.exe whose ExecutablePath is under the clone
+          home, so the real extension host and the running Chrome are never touched.
+  result  0 back-up failures and 0 "Access is denied" across 375 log lines after the
+          change; clone still answers (FINAL-VERIFY-OK, 16,285 tokens).
+  still   "failed to warm featured plugin ids cache" remains and is expected: the clone
+  ok      has no ChatGPT auth, so chatgpt.com/backend-api/plugins/featured refuses.
+          Not a bug. Do not chase it.
+
+WINDOWS SANDBOX BANNER (2026-11-01)
+-----------------------------------
+The clone UI shows "Couldn't check Windows setup / Try again to continue Windows
+setup". That banner is COSMETIC and deliberately left alone.
+
+  cause   HKLM\SOFTWARE\OpenAI\Codex\WindowsSandboxService
+          ProvisionedInstallation.codex_home is a single value, C:\Users\rahma\.codex.
+          The service binds provisioning to one CODEX_HOME, so a caller from
+          .codex-clone fails the identity check. codex.exe says it plainly:
+          "registered Core setup belongs to another Codex home".
+  proof   the exe is NOT failing. Clone logs contain
+          windowsSandbox/setupStart -> windowsSandbox/setupCompleted
+          (23:41:07 and 23:48:27). It is the readiness call after it that refuses.
+  exec    FULL-ACCESS PASS via CLI, unaffected by the banner:
+          CODEX_HOME=.codex-clone, --sandbox danger-full-access,
+          `echo FULLACCESS-PROBE` -> succeeded in 204ms, stdout FULLACCESS-PROBE.
+  why no  rewriting that registry value would move provisioning to the clone and
+  fix     STRIP the sandbox from the real ChatGPT account. Not worth a cosmetic
+          banner. Registry untouched.
+  do not  re-investigate this. No registry edits, no re-provisioning, no more
+          codex.exe dissection hunting a way to skip windowsSandbox/readiness.
+
+
+WHAT WOULD CHANGE THE REMAINING VERDICTS
+----------------------------------------
+  browser in-app   an MSO app host, or drive it from inside the ChatGPT window
+  computer use     approve Chrome / Notepad in the ChatGPT UI, re-run the probe
+  sub-agents       settled: fixed by using an OpenAI-native upstream model
+  images           settled: same, and the gateway swap/flatten is documented above
+  sandboxed mode   would need per-home provisioning in the app itself; out of
+                   scope, and the clone runs full-access by design

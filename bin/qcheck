@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Run both quick tests and print one verdict.
+#
+#   qcheck            # clone (build + probes + browser), then Codex on both providers
+#   qcheck clone      # repo only
+#   qcheck codex      # Codex only
+#   qcheck clone --no-build
+#
+# Exit code is non-zero if a side that actually ran failed.
+set -uo pipefail
+WHICH="${1:-both}"
+[ $# -gt 0 ] && shift
+
+run_clone=1
+run_codex=1
+case "$WHICH" in
+clone) run_codex=0 ;;
+codex) run_clone=0 ;;
+esac
+
+clone_rc=0
+codex_rc=0
+caps_rc=0
+clone_state="skipped"
+codex_state="skipped"
+caps_state="skipped"
+
+if [ "$run_clone" -eq 1 ]; then
+	printf '\n########## codex-clone-placeholder ##########\n'
+	if codex-clone-quicktest "$@"; then clone_state="ok"; else
+		clone_state="FAILED"
+		clone_rc=1
+	fi
+fi
+
+if [ "$run_codex" -eq 1 ]; then
+	printf '\n########## codex real (chatgpt vs 9router) ##########\n'
+	# Run from a scratch dir: ~/.codex/config.toml must not leak in as project config.
+	mkdir -p /mnt/c/Users/rahma/Documents/probe
+	if WORKDIR='C:\Users\rahma\Documents\probe' codex-real-quicktest; then codex_state="ok"; else
+		codex_state="FAILED"
+		codex_rc=1
+	fi
+
+	printf '\n########## codex capabilities ##########\n'
+	if codex-caps-quicktest; then caps_state="ok"; else
+		caps_state="FAILED"
+		caps_rc=1
+	fi
+fi
+
+printf '\n########## verdict ##########\n'
+printf '  clone : %s\n' "$clone_state"
+printf '  codex : %s\n' "$codex_state"
+printf '  caps  : %s\n' "$caps_state"
+
+[ "$clone_rc" -eq 0 ] && [ "$codex_rc" -eq 0 ] && [ "$caps_rc" -eq 0 ]

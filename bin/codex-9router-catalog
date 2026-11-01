@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Generate Codex model catalog for 9router, per-model fields derived from live capabilities.
+
+Two fields are non-negotiable for tool calling to work through 9router:
+  tool_mode          = "code_mode_only"   -> Codex sends exec as a custom (freeform) tool
+  use_responses_lite = false              -> plain tool names; Responses-Lite breaks them
+Proven by capture: with lite=true Codex sends tools the upstream mangles into
+"functions"/"functions.exec", which the router rejects as `unsupported call`.
+
+Usage:
+  NINE_ROUTER_KEY=sk-... codex-9router-catalog [--codex-home DIR] [--out FILE]
+"""
+import argparse
+import json
+import os
+import urllib.request
+
+DEFAULT_HOME = os.environ.get("CODEX_HOME") or "/mnt/c/Users/rahma/.codex"
+BASE = os.environ.get("NINE_ROUTER_URL", "https://router.antinrml.com/v1")
+
+LEVELS = [
+    {"effort": "low", "description": "Fast responses with lighter reasoning"},
+    {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
+    {"effort": "high", "description": "Greater reasoning depth for complex problems"},
+]
+
+
+def fetch_models(key):
+    req = urllib.request.Request(BASE + "/models", headers={"Authorization": "Bearer " + key})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return {m["id"]: m for m in json.load(resp)["data"]}
+
+
+def build_entry(template, slug, cap, priority):
+    caps = cap.get("capabilities") or {}
+    ctx = cap.get("context_length") or caps.get("contextWindow") or 128000
+    out_tokens = cap.get("max_completion_tokens") or caps.get("maxOutput") or 16000
+
+    entry = json.loads(json.dumps(template))
+    entry.update(
+        slug=slug,
+        display_name=f"{slug} \u00b7 9router",
+        description="9router upstream",
+        priority=priority,
+        # --- tool calling: the two load-bearing fields ---
+        tool_mode="code_mode_only",
+        use_responses_lite=False,
+        experimental_supported_tools=[],
+        # --- reasoning, only advertise what the upstream claims ---
+        supported_reasoning_levels=LEVELS if caps.get("thinkingEffortSupported") else [],
+        default_reasoning_level="medium" if caps.get("thinkingEffortSupported") else "none",
+        supports_reasoning_effort_updates=bool(caps.get("thinkingEffortSupported")),
+        # --- modality ---
+        input_modalities=["text", "image"] if caps.get("vision") else ["text"],
+        supports_image_detail_original=bool(caps.get("vision")),
+        supports_search_tool=bool(caps.get("search")),
+        # --- limits ---
+        context_window=ctx,
+        max_context_window=ctx,
+        truncation_policy={"mode": "tokens", "limit": min(10000, out_tokens)},
+        # --- keep plugin/app instructions: that is what makes MCP + skills usable ---
+        include_plugin_usage_instructions=True,
+        include_apps_usage_instructions=True,
+        include_skills_usage_instructions=True,
+        multi_agent_version="v2",
+        node_repl_disabled=False,
+    )
+    for key in ("service_tiers", "additional_speed_tiers", "availability_nux", "upgrade", "comp_hash"):
+        entry.pop(key, None)
+    return entry
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--codex-home", default=DEFAULT_HOME)
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--template", default=None)
+    args = ap.parse_args()
+
+    key = os.environ.get("NINE_ROUTER_KEY")
+    if not key:
+        raise SystemExit("NINE_ROUTER_KEY is not set")
+
+    out = args.out or os.path.join(args.codex_home, "nine-router-models.json")
+    template_path = args.template or os.path.join(args.codex_home, "models_cache.json")
+    template = json.load(open(template_path))["models"][0]
+
+    live = fetch_models(key)
+    if not live:
+        raise SystemExit("9router returned no models")
+
+    # DEFAULT_MODEL wins priority 0; that is the model the clone opens with, so a
+    # regeneration must not silently move it. Everything else keeps the historical
+    # order: plain slugs first, then the `ctx/` prefixed ones, each alphabetical.
+    default = os.environ.get("DEFAULT_MODEL", "cx/gpt-6.1-sol")
+    ordered = sorted(live, key=lambda s: (s != default, s.startswith("ctx/"), s))
+    if default not in live:
+        print(f"warn: DEFAULT_MODEL {default} not served by the gateway; priority 0 is {ordered[0]}")
+    models = [build_entry(template, slug, live[slug], i) for i, slug in enumerate(ordered)]
+    json.dump({"models": models}, open(out, "w"), separators=(",", ":"))
+
+    with_tools = sum(1 for m in models if m["tool_mode"] == "code_mode_only")
+    print(f"{len(models)} models ({with_tools} tool-capable) -> {out}")
+
+
+if __name__ == "__main__":
+    main()

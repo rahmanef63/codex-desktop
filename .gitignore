@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+9router.config.toml
+auth.json
+
+# Machine-local artifacts
+*.log
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.evidence/
+parity-evidence/*.raw
+
+# Editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
