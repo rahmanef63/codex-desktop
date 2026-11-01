@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# Enforce CONTRACT §13 — "do not touch the real account when testing the clone" — as a check,
+# not as a promise.
+#
+#   isolation-check snapshot          # before a probe: counts, hashes, PID list
+#   isolation-check verify            # after a probe: one PASS/FAIL line per invariant
+#   isolation-check                   # verify if a snapshot exists, else usage
+#
+# Exit code is non-zero when an invariant fails *or* when one cannot be measured. "Could not
+# check" is not a pass: that is the same rule as CONTRACT §11, probe the disk, never the model.
+#
+# Read-only by construction. The real home is never written, only counted and hashed; the only
+# file this script creates is $SNAPSHOT_FILE. It never stops a process, never launches Codex.
+set -uo pipefail
+
+# Overridable so this is not bound to one machine's account.
+USERPROFILE_WSL="${USERPROFILE_WSL:-/mnt/c/Users/rahma}"
+SNAPSHOT_FILE="${SNAPSHOT_FILE:-/tmp/isolation-check.snapshot.tsv}"
+
+REAL="$USERPROFILE_WSL/.codex"
+CLONE="$USERPROFILE_WSL/.codex-clone"
+PROBE="$USERPROFILE_WSL/.codex-probe"
+
+# The three process families the desktop app runs. `extension-host` is Chrome's plugin host,
+# which the app launches from inside its own cache directory.
+PROC_RE="${PROC_RE:-ChatGPT|codex|extension-host}"
+
+PASS=0
+FAIL=0
+
+ok()   { printf '  PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()  { printf '  FAIL  %s\n' "$1"; FAIL=$((FAIL + 1)); }
+info() { printf '  INFO  %s\n' "$1"; }
+
+usage() {
+	cat >&2 <<'EOF'
+Enforce CONTRACT §13 — "do not touch the real account when testing the clone" — as a check.
+
+  isolation-check snapshot          # before a probe: counts, hashes, PID list
+  isolation-check verify            # after a probe: one PASS/FAIL line per invariant
+  isolation-check                   # verify if a snapshot exists, else this message
+
+Env: USERPROFILE_WSL (default /mnt/c/Users/rahma), SNAPSHOT_FILE
+     (default /tmp/isolation-check.snapshot.tsv), PROC_RE.
+
+SNAPSHOT_FILE must resolve outside .codex, .codex-clone and .codex-probe — the
+snapshot is the only file this script writes, so it must not land in a home it protects.
+
+Exit code is non-zero when an invariant fails *or* when one cannot be measured.
+Read-only: the real home is only counted and hashed; the snapshot file is the only write.
+EOF
+	exit 2
+}
+
+# The script's single write must not be aimable at the home it protects. `realpath -m` resolves
+# symlinks and `..` without requiring the path to exist, so a traversal or a symlinked directory
+# is caught before anything is created. Returns 1 and prints the offending path when refused.
+guard_snapshot_path() {
+	local target root resolved r
+	target=$(realpath -m -- "$SNAPSHOT_FILE" 2>/dev/null) || {
+		printf '  FAIL  SNAPSHOT_FILE is not a usable path: %s\n' "$SNAPSHOT_FILE" >&2
+		return 1
+	}
+	for root in "$REAL" "$CLONE" "$PROBE"; do
+		resolved=$(realpath -m -- "$root" 2>/dev/null) || continue
+		[ -n "$resolved" ] || continue
+		# Compare with a trailing slash so `.codex-backup` is not treated as inside `.codex`.
+		case "$target/" in
+		"$resolved"/*)
+			printf '  FAIL  SNAPSHOT_FILE resolves inside a protected home: %s\n' "$target" >&2
+			printf '        refused: %s is under %s\n' "$SNAPSHOT_FILE" "$root" >&2
+			printf '        put the snapshot outside .codex, .codex-clone and .codex-probe.\n' >&2
+			return 1
+			;;
+		esac
+	done
+	return 0
+}
+
+summary() {
+	printf '\n%s: %d passed, %d failed\n' "$([ "$FAIL" -eq 0 ] && echo OK || echo FAILED)" "$PASS" "$FAIL"
+	[ "$FAIL" -eq 0 ] || exit 1
+	exit 0
+}
+
+count_sessions() {
+	[ -d "$1/sessions" ] || return 1
+	find "$1/sessions" -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+md5_of() {
+	[ -f "$1" ] || return 1
+	local h
+	h=$(md5sum "$1" 2>/dev/null | cut -d' ' -f1) || return 1
+	[ -n "$h" ] || return 1
+	printf '%s\n' "$h"
+}
+
+# Prints one PID per line, sorted. Returns non-zero when the process list cannot be read at all —
+# which is different from "no ChatGPT running", and must not be treated as success.
+list_pids() {
+	local out
+	out=$(powershell.exe -NoProfile -Command \
+		"Get-Process | Where-Object {\$_.ProcessName -match '$PROC_RE'} | Select-Object -ExpandProperty Id" \
+		2>/dev/null) || return 1
+	printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+$' | sort -n -u
+	return 0
+}
+
+snap_field() { # snap_field <key> <second-field>
+	awk -F'\t' -v k="$1" -v f="$2" '$1 == k && $2 == f { print $3; exit }' "$SNAPSHOT_FILE"
+}
+
+snap_pids() { awk -F'\t' '$1 == "pid" { print $2 }' "$SNAPSHOT_FILE" | sort -n -u; }
+
+# ---------------------------------------------------------------------------- snapshot
+
+cmd_snapshot() {
+	guard_snapshot_path || { FAIL=$((FAIL + 1)); summary; }
+
+	printf '\n=== isolation check: snapshot ===\n'
+	printf 'home: %s\n' "$USERPROFILE_WSL"
+	printf 'file: %s\n\n' "$SNAPSHOT_FILE"
+
+	if [ ! -d "$REAL" ]; then
+		bad "real home missing: $REAL — a snapshot of nothing proves nothing"
+		summary
+	fi
+
+	local n_real n_clone n_probe md5_cfg md5_auth pids
+	if ! n_real=$(count_sessions "$REAL"); then
+		bad "cannot count $REAL/sessions"
+		summary
+	fi
+	n_clone=$(count_sessions "$CLONE") || n_clone="missing"
+	n_probe=$(count_sessions "$PROBE") || n_probe="missing"
+	md5_cfg=$(md5_of "$REAL/config.toml") || md5_cfg="missing"
+	md5_auth=$(md5_of "$REAL/auth.json") || md5_auth="missing"
+	pids=$(list_pids) || {
+		bad "cannot read the Windows process list — pre-existing PIDs would be unverifiable"
+		summary
+	}
+
+	{
+		printf '# isolation-check snapshot — see bin/isolation-check\n'
+		printf '# generated\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		printf 'home\t%s\n' "$USERPROFILE_WSL"
+		printf 'sessions\t.codex\t%s\n' "$n_real"
+		printf 'sessions\t.codex-clone\t%s\n' "$n_clone"
+		printf 'sessions\t.codex-probe\t%s\n' "$n_probe"
+		printf 'md5\t.codex/config.toml\t%s\n' "$md5_cfg"
+		printf 'md5\t.codex/auth.json\t%s\n' "$md5_auth"
+		printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sed 's/^/pid\t/'
+	} >"$SNAPSHOT_FILE" || {
+		bad "cannot write $SNAPSHOT_FILE"
+		summary
+	}
+
+	info "real home sessions: $n_real"
+	info "clone home sessions: $n_clone"
+	info "probe home sessions: $n_probe (allowed to grow)"
+	info "pre-existing PIDs recorded: $(printf '%s\n' "$pids" | grep -cE '^[0-9]+$')"
+	ok "snapshot written to $SNAPSHOT_FILE"
+	summary
+}
+
+# ------------------------------------------------------------------------------ verify
+
+check_count() { # check_count <label> <home-name> <home-path>
+	local label="$1" rel="$2" home="$3" was now
+	was=$(snap_field sessions "$rel")
+	if [ -z "$was" ]; then
+		bad "$label — snapshot has no count for $rel"
+		return
+	fi
+	if ! now=$(count_sessions "$home"); then
+		bad "$label — cannot count $home/sessions (home missing?)"
+		return
+	fi
+	if [ "$was" = "$now" ]; then
+		ok "$label — $now files, unchanged"
+	else
+		bad "$label — was $was, now $now"
+	fi
+}
+
+check_md5() { # check_md5 <label> <relative-path> <absolute-path>
+	local label="$1" rel="$2" file="$3" was now
+	was=$(snap_field md5 "$rel")
+	if [ -z "$was" ]; then
+		bad "$label — snapshot has no md5 for $rel"
+		return
+	fi
+	if ! now=$(md5_of "$file"); then
+		bad "$label — cannot read $file"
+		return
+	fi
+	if [ "$was" = "$now" ]; then
+		ok "$label — $now, unchanged"
+	else
+		bad "$label — was $was, now $now"
+	fi
+}
+
+cmd_verify() {
+	guard_snapshot_path || { FAIL=$((FAIL + 1)); summary; }
+
+	printf '\n=== isolation check: verify ===\n'
+	printf 'home: %s\n' "$USERPROFILE_WSL"
+	printf 'file: %s\n\n' "$SNAPSHOT_FILE"
+
+	if [ ! -f "$SNAPSHOT_FILE" ]; then
+		bad "no snapshot at $SNAPSHOT_FILE — nothing to compare against"
+		printf '        record one first:  SNAPSHOT_FILE=%s isolation-check snapshot\n' "$SNAPSHOT_FILE" >&2
+		summary
+	fi
+	if [ ! -d "$REAL" ]; then
+		bad "real home missing: $REAL — an unverifiable claim is not a pass"
+		summary
+	fi
+
+	local recorded_home
+	recorded_home=$(awk -F'\t' '$1 == "home" { print $2; exit }' "$SNAPSHOT_FILE")
+	if [ "$recorded_home" != "$USERPROFILE_WSL" ]; then
+		bad "snapshot was taken against '${recorded_home:-<none>}', not '$USERPROFILE_WSL' — not comparable"
+		summary
+	fi
+
+	# Invariants 1-4: nothing in either home moved.
+	check_count "real home sessions unchanged"  .codex       "$REAL"
+	check_md5   "real config.toml unchanged"     .codex/config.toml "$REAL/config.toml"
+	check_md5   "real auth.json unchanged"       .codex/auth.json   "$REAL/auth.json"
+	check_count "clone home sessions unchanged" .codex-clone "$CLONE"
+
+	# Invariant 5: every process that existed before the run is still running.
+	local was_pids want cur died
+	was_pids=$(snap_pids)
+	want=$(printf '%s\n' "$was_pids" | grep -cE '^[0-9]+$')
+	if [ "$want" -eq 0 ]; then
+		info "pre-existing PIDs: none recorded in the snapshot"
+	elif ! cur=$(list_pids); then
+		bad "pre-existing PIDs ($want recorded) — cannot read the process list, so unverifiable"
+	else
+		# Compared by membership, not by order; PID reuse is not detected. Cheap and enough:
+		# a probe that kills the real app kills it for the whole run, not for a few seconds.
+		died=$(awk 'NR == FNR { cur[$1]; next } !($1 in cur)' \
+			<(printf '%s\n' "$cur") <(printf '%s\n' "$was_pids"))
+		if [ -z "$died" ]; then
+			ok "all $want pre-existing PIDs still alive"
+		else
+			bad "pre-existing PIDs gone: $(printf '%s' "$died" | tr '\n' ' ')"
+		fi
+	fi
+
+	# Invariant 6: the probe home is where probes are supposed to write. Growth is the point.
+	local probe_was probe_now delta
+	probe_was=$(snap_field sessions .codex-probe)
+	if ! probe_now=$(count_sessions "$PROBE"); then
+		info "probe home sessions: unreadable or absent (no probe has run yet)"
+	elif [ -z "$probe_was" ] || [ "$probe_was" = "missing" ]; then
+		info "probe home sessions: $probe_now (no baseline in snapshot)"
+	else
+		delta=$((probe_now - probe_was))
+		info "probe home sessions: $probe_was -> $probe_now (delta $delta, growth expected and harmless)"
+	fi
+
+	summary
+}
+
+case "${1:-}" in
+snapshot) cmd_snapshot ;;
+verify) cmd_verify ;;
+"") if [ -f "$SNAPSHOT_FILE" ]; then cmd_verify; else usage; fi ;;
+-h | --help | help) usage ;;
+*)
+	printf 'unknown subcommand: %s\n\n' "$1" >&2
+	usage
+	;;
+esac
