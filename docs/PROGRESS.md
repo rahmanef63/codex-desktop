@@ -129,12 +129,13 @@ semua path `/v1*`. Bukan regresi di sisi app.
 2. ~~`Access is denied (os error 5)` pada refresh plugin cache `chrome@openai-bundled`.~~
    **SELESAI** — akar dan perbaikannya di 5g.
 3. Bearer token 9router masih plaintext di profil dan sudah muncul di transkrip — rotasi belum.
-4. **Turn bergambar lewat UI belum pernah diuji di `.codex-clone`.** Jalur CLI sudah terbukti
-   dan sekarang punya probe sendiri (5i). Attach-gambar dari composer app belum. Prasyarat:
-   launch lewat `codex-launch.ps1 -Mode clone` supaya config clone tidak tertinggal di `ctx/*`.
-5. **Klaim 5f soal `ctx/*` perlu dianggap tidak stabil, bukan mutlak.** Lihat koreksi di 5i:
-   `ctx/*` menerima gambar, tapi 2 dari 3 run gagal tanpa jawaban. Jangan pakai 5f sebagai
-   rujukan mekanisme lagi.
+4. ~~Probe `codex-caps-quicktest` menulis ke home asli.~~ **SELESAI 2026-11-01** — sisi 9router
+   kini pakai `~/.codex-probe`; sisi chatgpt tak bisa dipindah (5i).
+5. **Turn bergambar lewat UI belum pernah diuji di `.codex-clone`.** Jalur CLI sudah terbukti
+   dan punya probe sendiri (5i). Attach-gambar dari composer app belum. Config clone sudah
+   kembali ke `cx/gpt-6.1-sol` (dicek 2026-11-01 21:26).
+6. **Klaim 5f soal `ctx/*` perlu dianggap tidak stabil, bukan mutlak.** Lihat koreksi di 5i:
+   `ctx/*` menerima gambar, tapi 2 dari 3 run gagal tanpa jawaban.
 
 ## 5h. `qcheck` penuh 2026-11-01 — verdict apa adanya
 
@@ -217,6 +218,33 @@ Jadi probe ini gate yang sah untuk `cx/*` (default yang dikirim), dan smoke test
 Setelah probe ditambahkan, `codex-caps-quicktest` penuh: **22 passed, 0 failed, 6 skipped**
 (log: `parity-evidence/caps-2026-11-01-images.txt`), yaitu 20 sebelumnya + `images (CLI -i)` di
 kedua provider.
+
+### Isolasi probe — 2026-11-01
+
+Probe dulu menulis ke home asli: `~/.codex/sessions` naik 209 → 366 dalam satu sesi. Itu
+melanggar CONTRACT §1 dan §13 (jangan sentuh akun asli saat menguji clone). Sekarang:
+
+| sisi | `CODEX_HOME` | bisa diisolasi? |
+| --- | --- | --- |
+| 9router (`-p 9router`) | `~/.codex-probe` | **ya** — profil disalin saat pertama jalan |
+| chatgpt | `~/.codex` | **tidak** — butuh `auth.json` home itu |
+
+Sesudah perbaikan, 12 rollout baru semuanya `model_provider: openai` (sisi chatgpt); sisi 9router
+pindah ke probe home (21 → 41 file). Jadi sisa kebocoran itu **hanya** sisi yang memang tak bisa
+dipindah.
+
+Dua jebakan yang muncul saat memindahkan home:
+
+1. `CODEX_HOME` di-prefix sebagai `\$env:...` (backslash literal), jadi tidak pernah ter-set dan
+   probe tetap menulis ke home asli. Sekarang di-`printf '%s'` dengan tanda kutip tunggal.
+2. **`--sandbox workspace-write` diam-diam jadi `read-only`** kalau home bukan home terdaftar —
+   persis konsekuensi 5c. Gejalanya `apply_patch` gagal dengan "writing is blocked by read-only
+   sandbox", dan `apply_patch (on disk)` FAIL padahal model mengklaim sudah menulis. Karena itu
+   sisi 9router memakai `danger-full-access` (sama seperti clone sebenarnya berjalan), sisi
+   chatgpt tetap `workspace-write` karena home-nya memang yang terdaftar.
+
+`codex-real-quicktest` **tidak** diubah: ia memang harus menguji profil asli, salinan akan
+membuktikan hal lain. Konsekuensinya sisi itu tetap menambah riwayat akun asli.
 
 ### Koreksi 5f
 

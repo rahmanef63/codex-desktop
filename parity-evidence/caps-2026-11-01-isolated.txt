@@ -1,0 +1,37 @@
+
+=== codex capability matrix ===
+
+--- chatgpt
+  PASS  chat                   verified
+  PASS  exec                   verified
+  PASS  file write+read        verified
+  PASS  apply_patch            verified
+  PASS  apply_patch (on disk)  file content confirmed
+  PASS  artifact html          verified
+  PASS  artifact html (on disk) fragment content confirmed
+  PASS  parallel tools         verified
+  PASS  sub-agents             verified
+  PASS  images (CLI -i)        6-char pixel marker read back
+  PASS  web search             verified
+  PASS  clock                  verified
+  SKIP  browser (in-app)       blocked: needs an app host pipe; CLI has none
+  SKIP  computer use           blocked: per-app approval happens in the ChatGPT UI
+
+--- 9router
+  PASS  chat                   verified
+  PASS  exec                   verified
+  PASS  file write+read        verified
+  PASS  apply_patch            verified
+  PASS  apply_patch (on disk)  file content confirmed
+  PASS  artifact html          verified
+  PASS  artifact html (on disk) fragment content confirmed
+  PASS  parallel tools         verified
+  PASS  sub-agents             verified
+  PASS  images (CLI -i)        6-char pixel marker read back
+  SKIP  web search             hosted OpenAI tool, no gateway equivalent
+  SKIP  clock                  namespace tool, no gateway equivalent
+  SKIP  browser (in-app)       blocked: needs an app host pipe; CLI has none
+  SKIP  computer use           blocked: per-app approval happens in the ChatGPT UI
+
+=== 22 passed, 0 failed ===
+RC=0

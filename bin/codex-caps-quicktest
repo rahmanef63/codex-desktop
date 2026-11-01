@@ -17,7 +17,48 @@ WORKDIR_WSL="${WORKDIR_WSL:-/mnt/c/Users/rahma/Documents/probe}"
 # Rollouts, read after a probe to find out what the model actually did.
 SESSION_DIR_WSL="${SESSION_DIR_WSL:-/mnt/c/Users/rahma/.codex-clone/sessions}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)"
+# The 9router probes run against their own home. Without this every probe appended a rollout
+# to the real ChatGPT account's history: measured 2026-11-01, 209 -> 306 files in one session.
+# The chatgpt side cannot be isolated — it needs that home's auth.json — so it stays put.
+PROBE_HOME_WIN="${PROBE_HOME_WIN:-C:\\Users\\rahma\\.codex-probe}"
+PROBE_HOME_WSL="${PROBE_HOME_WSL:-/mnt/c/Users/rahma/.codex-probe}"
+PROFILE_SOURCE_WSL="${PROFILE_SOURCE_WSL:-/mnt/c/Users/rahma/.codex}"
 WHICH="${1:-both}"
+
+# Codex layers -p <name> as $CODEX_HOME/<name>.config.toml, so the probe home needs its own copy.
+# The base config.toml matters too: without a trusted workdir, Codex silently downgrades
+# --sandbox workspace-write to read-only and apply_patch fails. Measured 2026-11-01.
+seed_probe_home() {
+	mkdir -p "$PROBE_HOME_WSL"
+	if [ ! -f "$PROBE_HOME_WSL/9router.config.toml" ]; then
+		if [ ! -f "$PROFILE_SOURCE_WSL/9router.config.toml" ]; then
+			printf '  SKIP  %-22s %s\n' "probe home" "no profile to seed from"
+			return 1
+		fi
+		cp "$PROFILE_SOURCE_WSL/9router.config.toml" "$PROBE_HOME_WSL/9router.config.toml"
+		printf '  seeded probe home from %s\n' "$PROFILE_SOURCE_WSL/9router.config.toml"
+	fi
+	if [ ! -f "$PROBE_HOME_WSL/config.toml" ]; then
+		cat > "$PROBE_HOME_WSL/config.toml" <<'TOML'
+# Base config for the capability probes only. Separate from ~/.codex on purpose: probes
+# used to append rollouts to the real ChatGPT account's history.
+[projects."c:\\users\\rahma\\documents\\probe"]
+trust_level = "trusted"
+TOML
+		printf '  seeded probe base config\n'
+	fi
+	return 0
+}
+
+# Prefix that points a probe at the probe home. Empty for the chatgpt side, deliberately.
+home_prefix() {
+	case "$1" in
+	# Single-quoted so powershell sees `$env:CODEX_HOME`, not a literal backslash-dollar.
+	*9router*) printf '%s' "\$env:CODEX_HOME='$PROBE_HOME_WIN'; " ;;
+	*) printf '' ;;
+	esac
+}
+
 
 if [ "$WHICH" = "--list" ]; then
 	cat <<'EOF'
@@ -46,11 +87,32 @@ ok()  { printf '  PASS  %-22s %s\n' "$1" "$2"; PASS=$((PASS + 1)); }
 bad() { printf '  FAIL  %-22s %s\n' "$1" "$2"; FAIL=$((FAIL + 1)); }
 skip(){ printf '  SKIP  %-22s %s\n' "$1" "$2"; }
 
+# codex_exec <flag> <rest of the codex command line>
+# Single place that builds the invocation, so the per-profile CODEX_HOME is never forgotten.
+#
+# The sandbox flag differs per side on purpose. The Windows sandbox layer is provisioned by
+# HKLM\SOFTWARE\OpenAI\Codex\WindowsSandboxService for ONE home (PROGRESS 5c), so asking for
+# --sandbox workspace-write from the probe home silently downgrades to read-only and every
+# apply_patch dies with "writing is blocked by read-only sandbox". Measured 2026-11-01.
+# The 9router side therefore runs danger-full-access, which is how the clone actually runs
+# anyway; the chatgpt side keeps workspace-write because its home IS the registered one.
+probe_sandbox() {
+	case "$1" in
+	*9router*) printf 'danger-full-access' ;;
+	*) printf 'workspace-write' ;;
+	esac
+}
+
+codex_exec() {
+	local flag="$1"; shift
+	powershell.exe -NoProfile -Command \
+		"$(home_prefix "$flag")& '$CODEX_EXE' $flag exec --sandbox $(probe_sandbox "$flag") --skip-git-repo-check -C '$WORKDIR' $*" 2>&1
+}
+
 # probe <capability> <expect> <flag> <prompt> [skip_reason_on_fail]
 probe() {
 	local cap="$1" want="$2" flag="$3" prompt="$4" hint="${5:-}" out
-	out=$(powershell.exe -NoProfile -Command \
-		"& '$CODEX_EXE' $flag exec --sandbox workspace-write --skip-git-repo-check -C '$WORKDIR' '$prompt'" 2>&1)
+	out=$(codex_exec "$flag" "'$prompt'")
 	if grep -qF "$want" <<<"$out"; then ok "$cap" "verified"; return; fi
 	bad "$cap" "${hint:-wanted $want}"
 	if grep -q "unsupported call: collaboration" <<<"$out"; then
@@ -67,8 +129,7 @@ probe() {
 # probe2 <capability> <want1> <want2> <flag> <prompt> [hint]
 probe2() {
 	local cap="$1" want1="$2" want2="$3" flag="$4" prompt="$5" hint="${6:-}" out
-	out=$(powershell.exe -NoProfile -Command \
-		"& '$CODEX_EXE' $flag exec --sandbox workspace-write --skip-git-repo-check -C '$WORKDIR' '$prompt'" 2>&1)
+	out=$(codex_exec "$flag" "'$prompt'")
 	if grep -qF "$want1" <<<"$out" && grep -qF "$want2" <<<"$out"; then ok "$cap" "verified"; return; fi
 	bad "$cap" "${hint:-wanted $want1 and $want2}"
 	if grep -q "unsupported call" <<<"$out"; then
@@ -84,8 +145,7 @@ probe2() {
 # For tools that return real data (a timestamp, a version) rather than an echo of a token.
 probe_re() {
 	local cap="$1" re="$2" flag="$3" prompt="$4" hint="${5:-}" out
-	out=$(powershell.exe -NoProfile -Command \
-		"& '$CODEX_EXE' $flag exec --sandbox workspace-write --skip-git-repo-check -C '$WORKDIR' '$prompt'" 2>&1)
+	out=$(codex_exec "$flag" "'$prompt'")
 	if grep -qE "$re" <<<"$out"; then ok "$cap" "verified"; return; fi
 	bad "$cap" "${hint:-no match for /$re/}"
 	if grep -q "unsupported call" <<<"$out"; then
@@ -132,8 +192,7 @@ probe_image() {
 
 	local tok
 	# `-i` is variadic, so the prompt must come after `--` or it is eaten as another image path.
-	out=$(powershell.exe -NoProfile -Command \
-		"& '$CODEX_EXE' $flag exec --sandbox workspace-write --skip-git-repo-check -C '$WORKDIR' -i '$WORKDIR\\cap-image-big.png' -- 'transcribe the exact text visible in the attached image and print it on its own line prefixed with CAP-IMAGE:'" 2>&1)
+	out=$(codex_exec "$flag" "-i '$WORKDIR\\cap-image-big.png' -- 'transcribe the exact text visible in the attached image and print it on its own line prefixed with CAP-IMAGE:'")
 
 	if grep -qF "CAP-IMAGE: $marker" <<<"$out"; then
 		ok "images (CLI -i)" "6-char pixel marker read back"
@@ -222,10 +281,12 @@ printf 'OLD\n' > cap-patch.txt
 
 case "$WHICH" in
 chatgpt) run "chatgpt" "" ;;
-9router) run "9router" "-p 9router" ;;
+9router)
+	seed_probe_home && run "9router" "-p 9router"
+	;;
 *)
 	run "chatgpt" ""
-	run "9router" "-p 9router"
+	seed_probe_home && run "9router" "-p 9router"
 	;;
 esac
 
