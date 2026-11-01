@@ -202,9 +202,9 @@ probe_image() {
 	bad "images (CLI -i)" "expected CAP-IMAGE: $marker"
 
 	if grep -qi "exceeded max context length\|prompt too long" <<<"$out"; then
-		printf '        -> base64 tokenised as text (PROGRESS 5f): use cx/* for images\n'
+		printf '        -> prompt too long: base64 likely went in as text; use cx/* for images (PROGRESS 5i)\n'
 	elif grep -qi "kimi" <<<"$out"; then
-		printf '        -> upstream swapped to kimi (PROGRESS 5f)\n'
+		printf '        -> kimi appeared: observed symptom, NOT the mechanism; see PROGRESS 5i\n'
 	fi
 	# The measured failure is not "the image never arrived": ctx/* does receive it and can even
 	# name the marker in its reasoning, then degenerates and never answers. Report the number,
