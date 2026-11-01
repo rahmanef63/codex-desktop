@@ -4,7 +4,7 @@ Catatan kerja, bukan dokumentasi produk. Ditulis supaya sesi berikutnya tidak me
 penyelidikan yang sama. Repo produk ada di `/home/rahman/projects/lara/codex-clone-placeholder`;
 berkas ini soal setup mesin, bukan repo.
 
-Terakhir diperbarui: 2026-11-01, setelah `qcheck` penuh (5h).
+Terakhir diperbarui: 2026-11-02, setelah `bin/isolation-check` (bagian 8).
 
 ## Status ringkas
 
@@ -595,3 +595,56 @@ diganti salinan agar invariant "nol junction" benar-benar nol. Ukuran clone naik
   angka berbeda untuk direktori yang sama bukan berarti korup.
 - Menghitung reparse point pada `C:\Users\rahma\.codex-clone` akan menghasilkan 1 karena
   path-nya sendiri, bukan isinya. Hitung dengan `-Recurse` dan buang dir root.
+
+## 8. `bin/isolation-check` — CONTRACT §13 jadi perintah (2026-11-02)
+
+§13 bilang "catat PID yang sudah ada duluan, lalu buktikan semuanya selamat". Sampai
+2026-11-02 itu hanya dikerjakan tangan, dan verifikasi tangan adalah verifikasi yang akan
+dilewatkan. Sekarang jadi skrip.
+
+```sh
+bin/isolation-check snapshot   # sebelum probe
+bin/isolation-check verify     # sesudah probe
+```
+
+Snapshot = jumlah file `sessions` di tiga home, md5 `config.toml` + `auth.json` home asli,
+dan daftar PID (`ChatGPT|codex|extension-host` lewat `powershell.exe`) yang diurutkan.
+`verify` mengukur ulang lalu mencetak satu baris PASS/FAIL per invariant:
+
+| # | invariant | gagal bila |
+| --- | --- | --- |
+| 1 | sesi home asli tetap | jumlah berubah |
+| 2 | md5 `config.toml` asli tetap | berubah |
+| 3 | md5 `auth.json` asli tetap | berubah |
+| 4 | sesi home clone tetap | jumlah berubah |
+| 5 | semua PID lama hidup | ada yang hilang |
+| 6 | sesi home probe | **tidak pernah gagal** — delta hanya dilaporkan |
+
+Invariant 6 sengaja tidak bisa memerahkan hasil: probe memang menulis ke `~/.codex-probe`.
+Menjadikannya kegagalan berarti menyuruh orang mematikan pemeriksaan.
+
+Aturan yang sama seperti §11: **tak bisa diukur ≠ lulus.** Home asli hilang, snapshot tidak ada,
+proses list tak terbaca, atau snapshot milik `USERPROFILE_WSL` lain → FAIL + exit non-zero.
+
+### Baseline terukur 2026-11-02
+
+| besaran | nilai |
+| --- | --- |
+| sesi home asli `.codex` | **443** |
+| sesi home clone `.codex-clone` | **23** |
+| sesi home probe `.codex-probe` | **76** |
+| md5 `config.toml` | `72f9e8969dde6776d1a0c1d7443d109d` |
+| md5 `auth.json` | `7f08dac46a32d2d458ea8cb9e4e18f66` |
+| PID pra-ada | **25**, semuanya hidup setelah probe |
+
+`snapshot` lalu `verify` pada sistem tenang: **5 PASS, 0 FAIL**, RC=0.
+
+### Batasnya, dinyatakan
+
+- Perbandingan PID berbasis keanggotaan, bukan urutan, dan **tidak** mendeteksi PID reuse. Cukup
+  untuk kasus yang sebenarnya dikejar: probe yang membunuh app asli membunuhnya untuk seluruh
+  run, bukan beberapa detik.
+- Kalau tak ada proses cocok sama sekali, invariant 5 dilaporkan INFO, bukan PASS diam-diam —
+  daftar kosong tidak membuktikan apa pun soal isolasi.
+- Skrip **tidak menulis apa pun** ke `~/.codex*`: hanya `find`, `md5sum`, `powershell.exe`.
+  Satu-satunya tulis adalah `$SNAPSHOT_FILE`.

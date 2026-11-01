@@ -27,6 +27,7 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `bin/codex-caps-quicktest` | Prints the capability matrix and probes it. |
 | `bin/codex-clone-quicktest` | Gates the sibling web repo: lint, types, tests, build, boot. |
 | `bin/qcheck` | Runs both quick tests and prints one verdict. |
+| `bin/isolation-check` | `snapshot` before a probe, `verify` after: proves the real account's sessions, config, auth and processes were untouched. Enforces CONTRACT §13. |
 | `scripts/capture_proxy.py` | Records the exact request the app sends to a gateway. |
 | `scripts/mcp_echo.py` | Harmless MCP server used to prove MCP survives the gateway path. |
 | `docs/PROGRESS.md` | Working notes: what is proven, what is not, and every trap that cost time. |
