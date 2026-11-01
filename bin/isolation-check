@@ -43,10 +43,38 @@ Enforce CONTRACT §13 — "do not touch the real account when testing the clone"
 Env: USERPROFILE_WSL (default /mnt/c/Users/rahma), SNAPSHOT_FILE
      (default /tmp/isolation-check.snapshot.tsv), PROC_RE.
 
+SNAPSHOT_FILE must resolve outside .codex, .codex-clone and .codex-probe — the
+snapshot is the only file this script writes, so it must not land in a home it protects.
+
 Exit code is non-zero when an invariant fails *or* when one cannot be measured.
 Read-only: the real home is only counted and hashed; the snapshot file is the only write.
 EOF
 	exit 2
+}
+
+# The script's single write must not be aimable at the home it protects. `realpath -m` resolves
+# symlinks and `..` without requiring the path to exist, so a traversal or a symlinked directory
+# is caught before anything is created. Returns 1 and prints the offending path when refused.
+guard_snapshot_path() {
+	local target root resolved r
+	target=$(realpath -m -- "$SNAPSHOT_FILE" 2>/dev/null) || {
+		printf '  FAIL  SNAPSHOT_FILE is not a usable path: %s\n' "$SNAPSHOT_FILE" >&2
+		return 1
+	}
+	for root in "$REAL" "$CLONE" "$PROBE"; do
+		resolved=$(realpath -m -- "$root" 2>/dev/null) || continue
+		[ -n "$resolved" ] || continue
+		# Compare with a trailing slash so `.codex-backup` is not treated as inside `.codex`.
+		case "$target/" in
+		"$resolved"/*)
+			printf '  FAIL  SNAPSHOT_FILE resolves inside a protected home: %s\n' "$target" >&2
+			printf '        refused: %s is under %s\n' "$SNAPSHOT_FILE" "$root" >&2
+			printf '        put the snapshot outside .codex, .codex-clone and .codex-probe.\n' >&2
+			return 1
+			;;
+		esac
+	done
+	return 0
 }
 
 summary() {
@@ -88,6 +116,8 @@ snap_pids() { awk -F'\t' '$1 == "pid" { print $2 }' "$SNAPSHOT_FILE" | sort -n -
 # ---------------------------------------------------------------------------- snapshot
 
 cmd_snapshot() {
+	guard_snapshot_path || { FAIL=$((FAIL + 1)); summary; }
+
 	printf '\n=== isolation check: snapshot ===\n'
 	printf 'home: %s\n' "$USERPROFILE_WSL"
 	printf 'file: %s\n\n' "$SNAPSHOT_FILE"
@@ -173,6 +203,8 @@ check_md5() { # check_md5 <label> <relative-path> <absolute-path>
 }
 
 cmd_verify() {
+	guard_snapshot_path || { FAIL=$((FAIL + 1)); summary; }
+
 	printf '\n=== isolation check: verify ===\n'
 	printf 'home: %s\n' "$USERPROFILE_WSL"
 	printf 'file: %s\n\n' "$SNAPSHOT_FILE"

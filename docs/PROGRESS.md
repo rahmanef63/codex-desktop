@@ -648,3 +648,16 @@ proses list tak terbaca, atau snapshot milik `USERPROFILE_WSL` lain → FAIL + e
   daftar kosong tidak membuktikan apa pun soal isolasi.
 - Skrip **tidak menulis apa pun** ke `~/.codex*`: hanya `find`, `md5sum`, `powershell.exe`.
   Satu-satunya tulis adalah `$SNAPSHOT_FILE`.
+- **Lubang revisi pertama, dan penutupnya (2026-11-02).** `SNAPSHOT_FILE` tidak divalidasi, jadi
+  satu-satunya tulis skrip ini bisa diarahkan **ke dalam** home yang justru dijaga:
+  `SNAPSHOT_FILE=/mnt/c/Users/rahma/.codex/canary.tsv … snapshot` → RC=0 dan file benar-benar
+  dibuat di sana. Ketahuan dengan menyerang alatnya sendiri, bukan dengan membacanya; audit
+  `xtrace` tidak bisa melihatnya karena redirection-nya memang sah, hanya tujuannya salah.
+  Sekarang `guard_snapshot_path()` menolak path yang resolve ke `.codex`, `.codex-clone` atau
+  `.codex-probe` sebelum kerja lain dimulai — di **kedua** subcommand, karena `verify` adalah
+  pre-flight resmi dan harus mengajarkan pemakaian yang benar. `realpath -m` dipakai supaya
+  symlink dan `..` ikut ternormalisasi sebelum dibandingkan (terbukti: `anything/../.codex/x.tsv`
+  dan symlink `/tmp/symtest/link -> .codex` dua-duanya ditolak, file tidak dibuat). Perbandingan
+  pakai garis miring di belakang, jadi sibling `.codex-backup` tidak ikut diblokir.
+  Sisa batas yang jujur: guard membandingkan path, bukan inode — hardlink ke dalam home tak
+  terdeteksi, dan itu memang di luar cakupan skrip sekecil ini.
