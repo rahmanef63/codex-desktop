@@ -14,6 +14,9 @@ CODEX_EXE="${CODEX_EXE:-C:\\Users\\rahma\\AppData\\Local\\OpenAI\\Codex\\bin\\22
 WORKDIR="${WORKDIR:-C:\\Users\\rahma\\Documents\\probe}"
 # Same directory from inside WSL, so a probe can inspect what actually landed on disk.
 WORKDIR_WSL="${WORKDIR_WSL:-/mnt/c/Users/rahma/Documents/probe}"
+# Rollouts, read after a probe to find out what the model actually did.
+SESSION_DIR_WSL="${SESSION_DIR_WSL:-/mnt/c/Users/rahma/.codex-clone/sessions}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)"
 WHICH="${1:-both}"
 
 if [ "$WHICH" = "--list" ]; then
@@ -28,6 +31,8 @@ artifact html      pass                          pass
 parallel tools     pass                          pass (via Promise.allSettled in exec)
 sub-agents         pass (collab: Wait)           pass on cx/gpt-6.1-sol only;
                                                  deepseek: unsupported call
+images (CLI -i)    pass                          cx: 3/3 pass; ctx: 1/3
+                                                 see PROGRESS 5i
 web search         pass                          not available (hosted tool)
 clock              pass                          not available (namespace tool)
 browser (in-app)   blocked: no app host          blocked: no app host
@@ -88,6 +93,73 @@ probe_re() {
 	fi
 }
 
+# probe_image <flag>
+# Proves the image arrived AT THE MODEL as an image, not as a fallback disk read.
+#
+# Size is the load-bearing variable (PROGRESS 5f): a 900x300 PNG survives every upstream, so
+# a small fixture makes this probe pass during the very incident it exists to catch. The
+# fixture is therefore full-page-screenshot sized, ~1 MB, which is what actually failed.
+#
+# Two assertions:
+#   1. the marker is printed   -> the model saw the pixels and finished the turn
+#   2. the turn did not blow up -> ctx/* can name the marker but never answers
+#
+# What this probe deliberately does NOT claim (corrected 2026-11-01, measured):
+#   - "ctx/* never receives the image" is FALSE. It receives it, and can print the marker.
+#   - "the model swaps to kimi" is one observed symptom, not the mechanism; it did not
+#     reproduce here.
+# What was actually measured on this fixture, 3 runs each:
+#   cx/gpt-6.1-sol   3/3 pass,  ~17.3k tokens, marker correct
+#   ctx/...deepseek  1/3 pass,  failures at 10.9k (view_image, no answer) and 256k (loop)
+# So a FAIL here is a true failure, but a PASS on ctx/* does not clear it. This is a real
+# gate for cx/* (the shipped default) and a smoke test elsewhere.
+# The marker is 6 random characters drawn as pixels, so it cannot be guessed from a filename.
+probe_image() {
+	local flag="$1" out marker png="$WORKDIR_WSL/cap-image-big.png" gen
+	if ! command -v powershell.exe >/dev/null; then
+		skip "images (CLI -i)" "powershell not reachable, cannot generate the fixture"
+		return
+	fi
+	local script_win
+	script_win=$(wslpath -w "$SCRIPT_DIR/mk-probe-image.ps1")
+	gen=$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$script_win" -Out "$WORKDIR\\cap-image-big.png" 2>&1)
+	marker=$(head -1 <<<"$gen" | tr -d '\r')
+	if [ ${#marker} -ne 6 ]; then
+		skip "images (CLI -i)" "could not generate the probe PNG: ${gen:0:80}"
+		return
+	fi
+
+
+	local tok
+	# `-i` is variadic, so the prompt must come after `--` or it is eaten as another image path.
+	out=$(powershell.exe -NoProfile -Command \
+		"& '$CODEX_EXE' $flag exec --sandbox workspace-write --skip-git-repo-check -C '$WORKDIR' -i '$WORKDIR\\cap-image-big.png' -- 'transcribe the exact text visible in the attached image and print it on its own line prefixed with CAP-IMAGE:'" 2>&1)
+
+	if grep -qF "CAP-IMAGE: $marker" <<<"$out"; then
+		ok "images (CLI -i)" "6-char pixel marker read back"
+		return
+	fi
+	bad "images (CLI -i)" "expected CAP-IMAGE: $marker"
+
+	if grep -qi "exceeded max context length\|prompt too long" <<<"$out"; then
+		printf '        -> base64 tokenised as text (PROGRESS 5f): use cx/* for images\n'
+	elif grep -qi "kimi" <<<"$out"; then
+		printf '        -> upstream swapped to kimi (PROGRESS 5f)\n'
+	fi
+	# The measured failure is not "the image never arrived": ctx/* does receive it and can even
+	# name the marker in its reasoning, then degenerates and never answers. Report the number,
+	# because that is the discriminator — cx finishes this turn in ~17k tokens.
+	tok=$(tr -d ' \n' <<<"$out" | grep -oE "tokens used[0-9,]+" | tail -1 | tr -dc '0-9')
+	if [ -n "$tok" ] && [ "$tok" -gt 100000 ]; then
+		printf '        -> turn degenerated: %s tokens and no answer; the image was re-sent each turn\n' "$tok"
+	fi
+	local rollout
+	rollout=$(ls -t "$SESSION_DIR_WSL"/*.jsonl 2>/dev/null | head -1)
+	if [ -n "$rollout" ] && grep -q "view_image" "$rollout"; then
+		printf '        -> it fell back to view_image, which reads the file from disk instead\n'
+	fi
+}
+
 run() {
 	local name="$1" flag="$2"
 	printf '\n--- %s\n' "$name"
@@ -124,6 +196,8 @@ run() {
 
 	probe "sub-agents" "collab:" "$flag" \
 		'spawn a sub-agent to compute 7*6, wait for it, and print the answer'
+
+	probe_image "$flag"
 
 	if [ "$name" = "chatgpt" ]; then
 		# These return real data, so the probe looks for the shape of an answer, not a marker.

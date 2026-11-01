@@ -21,6 +21,7 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | Path | What it does |
 | --- | --- |
 | `scripts/codex-launch.ps1` | The launcher. `-Mode real` or `-Mode clone`, and it re-asserts the two config values the app likes to rewrite. |
+| `scripts/mk-probe-image.ps1` | Generates the image-probe fixture: 1093×6000 px, ~1 MB, with a random 6-character marker drawn as pixels. Size is what makes the probe able to fail. |
 | `bin/codex-9router-catalog` | Regenerates the Codex model catalog from the gateway's live `/v1/models`. |
 | `bin/codex-real-quicktest` | Proves chat, exec and MCP against both providers. |
 | `bin/codex-caps-quicktest` | Prints the capability matrix and probes it. |
@@ -59,7 +60,7 @@ Proven on this machine; details and evidence in `parity-evidence/capability-matr
 | chat, exec, `apply_patch` | yes | yes | yes |
 | MCP tool call | yes | yes | yes |
 | sub-agents | yes | **yes** | **no** |
-| screenshots / images | yes | **yes** | **no** |
+| screenshots / images | yes | **yes** | flaky: 1 of 3 runs |
 | web search, clock | yes | no | no |
 | in-app browser | blocked | blocked | blocked |
 | computer use | per-app approval | per-app approval | per-app approval |
@@ -69,9 +70,12 @@ Two failures are silent and worth stating plainly:
 - **Sub-agents** need an OpenAI-native upstream. The gateway's Responses → Chat translator
   flattens a non-OpenAI upstream's `collaboration` namespace into one opaque function, so
   `spawn_agent` never reaches the model.
-- **Images** through a non-OpenAI upstream come back on a *different model* (`kimi-k2.7-code`),
-  with empty output, and the base64 is tokenised as text — about 87× the real cost. A 2.3 MB
-  screenshot costs 17,274 tokens via `cx/*` and blows past a million-token window anywhere else.
+- **Images** through a non-OpenAI upstream are unstable. Measured 2026-11-01 on a 1093×6000
+  screenshot-sized fixture: `cx/*` answered 3 of 3 runs at ~17.3k tokens; the `ctx/*` entry
+  answered 1 of 3, and the failures ended with no answer at all (one called `view_image` and
+  quit, one looped to 256k tokens). The image *does* arrive — earlier notes claiming a silent
+  model swap to `kimi-k2.7-code` and base64 tokenised as text did not reproduce. Use `cx/*`
+  for anything with an image; the reason is instability, not a swap.
 
 Both are upstream bugs in the gateway, not in this repo. They are documented so nobody spends a
 day rediscovering them.

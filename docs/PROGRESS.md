@@ -125,14 +125,16 @@ semua path `/v1*`. Bukan regresi di sisi app.
 ## 5. Yang belum
 
 1. ~~`codex-caps-quicktest` belum dijalankan penuh sejak katalog diubah.~~ **SELESAI 2026-11-01**
-   — lihat 5h. Verdict `20 passed, 0 failed, 6 skipped`.
+   — lihat 5h, dan 5i untuk probe gambar. Verdict `22 passed, 0 failed, 6 skipped`.
 2. ~~`Access is denied (os error 5)` pada refresh plugin cache `chrome@openai-bundled`.~~
    **SELESAI** — akar dan perbaikannya di 5g.
 3. Bearer token 9router masih plaintext di profil dan sudah muncul di transkrip — rotasi belum.
-4. **Turn bergambar lewat UI belum pernah diuji di `.codex-clone`.** Jalur CLI dengan
-   `CODEX_HOME` clone sudah terbukti (5f), tapi attach-gambar dari composer app belum.
-   Prasyarat: launch lewat `codex-launch.ps1 -Mode clone`, karena config clone saat ini
-   tertinggal di `ctx/*` (lihat 5h).
+4. **Turn bergambar lewat UI belum pernah diuji di `.codex-clone`.** Jalur CLI sudah terbukti
+   dan sekarang punya probe sendiri (5i). Attach-gambar dari composer app belum. Prasyarat:
+   launch lewat `codex-launch.ps1 -Mode clone` supaya config clone tidak tertinggal di `ctx/*`.
+5. **Klaim 5f soal `ctx/*` perlu dianggap tidak stabil, bukan mutlak.** Lihat koreksi di 5i:
+   `ctx/*` menerima gambar, tapi 2 dari 3 run gagal tanpa jawaban. Jangan pakai 5f sebagai
+   rujukan mekanisme lagi.
 
 ## 5h. `qcheck` penuh 2026-11-01 — verdict apa adanya
 
@@ -149,7 +151,7 @@ Dijalankan dari repo, log mentah: `parity-evidence/qcheck-2026-11-01.txt` (92 ba
 | --- | --- |
 | clone (`codex-clone-placeholder` @ `14fda46`) | 14 passed, 0 failed |
 | codex real | 5 passed, 0 failed (chatgpt: chat+exec, mcp SKIP tanpa server) |
-| caps | 20 passed, 0 failed, 6 skipped |
+| caps | 20 passed, 0 failed, 6 skipped (22 after the image probe, 5i) |
 
 Caps — run penuh pertama sejak katalog berubah:
 
@@ -167,16 +169,87 @@ Assertion disk tetap yang menentukan, bukan ucapan model: `cap-patch.txt` = `CAP
 **Temuan sampingan, belum diperbaiki:** `.codex-clone/config.toml` baris 31 =
 `model = "ctx/ollama/deepseek-v4.1-flash:1017-cloud"`, ditulis 10:57 — sesudah launcher terakhir
 jalan 08:23. Launcher menegakkan `cx/gpt-6.1-sol` tiap run, jadi luncuran clone berikutnya
-memulihkan sendiri. Tapi **sekarang** home clone sedang terpaku ke `ctx/*`, jalur yang di 5f
-terbukti menukar model diam-diam ke `kimi-k2.7-code` dan menokenisasi base64 sebagai teks.
-Menguji turn bergambar lewat UI tanpa lewat launcher lebih dulu akan mereproduksi 5f, bukan
-menguji clone. `Set-CloneWindowsSandboxElevated` dan `Set-ClonePluginDisabled` sudah benar
-sekarang (`sandbox = "elevated"`, `chrome@openai-bundled enabled = false`).
+memulihkan sendiri. Tapi **sekarang** home clone sedang terpaku ke `ctx/*`; lihat 5i untuk apa
+yang benar-benar rusak di jalur itu. `Set-CloneWindowsSandboxElevated` dan
+`Set-ClonePluginDisabled` sudah benar sekarang (`sandbox = "elevated"`,
+`chrome@openai-bundled enabled = false`).
 
 **Launcher hidup ≠ launcher repo.** `C:\Users\rahma\OneDrive\Desktop\codex-launch.ps1` masih
 hard-code `C:\Users\rahma\.codex` / `.codex-clone`; versi repo menerima `-RealHome`/`-CloneHome`.
 Perilakunya identik, jadi tidak ada yang perlu diperbaiki — sudah tercatat di bagian Rollback
 handover.
+
+## 5i. Turn bergambar — probe baru, dan koreksi atas 5f (2026-11-01)
+
+### Probe
+
+`codex-caps-quicktest` sekarang punya `probe_image`, dijalankan untuk kedua provider. Fixture
+dibuat saat itu juga oleh `scripts/mk-probe-image.ps1`, bukan file yang di-commit:
+
+| hal | nilai |
+| --- | --- |
+| ukuran | 1093 × 6000 px, ~1,05 MB |
+| isi | 6000 px teks lorem + satu baris penanda 6 karakter acak, digambar sebagai piksel |
+| klaim yang diuji | penanda tercetak `CAP-IMAGE: <6 char>` dan turn selesai |
+
+Ukuran itu **load-bearing**, bukan hiasan. Percobaan pertama saya memakai PNG 900×300 (3 pita
+warna); PNG kecil itu lolos di **semua** upstream, termasuk `ctx/*` yang di 5f disebut rusak.
+Probe sekecil itu akan PASS tepat pada insiden yang seharusnya ia tangkap. Pita warna juga
+bisa ditebak; penanda 6 karakter acak tidak.
+
+Dua jebakan yang termakan waktu:
+
+- `-i` bersifat variadic. Prompt tanpa `--` dimakan sebagai path gambar kedua, dan Codex lalu
+  menunggu prompt dari stdin (`No prompt provided via stdin`, exit 1).
+- `-c model=ctx/...` **tanpa** `-p 9router` tidak menguji gateway sama sekali: provider jatuh
+  ke `openai`, lalu `ERROR: The 'ctx/...' model is not supported when using Codex with a
+  ChatGPT account`. Override model harus selalu berpasangan dengan profil.
+
+### Hasil, 3 run per model pada fixture yang sama
+
+| model | hasil | token | catatan |
+| --- | --- | --- | --- |
+| `cx/gpt-6.1-sol` | **3/3 PASS** | ~17,3k | penanda benar |
+| `ctx/...deepseek-v4.1-flash:cloud` | **1/3 PASS** | 10,9k gagal; 256k gagal | tidak deterministik |
+
+Jadi probe ini gate yang sah untuk `cx/*` (default yang dikirim), dan smoke test di `ctx/*`.
+
+Setelah probe ditambahkan, `codex-caps-quicktest` penuh: **22 passed, 0 failed, 6 skipped**
+(log: `parity-evidence/caps-2026-11-01-images.txt`), yaitu 20 sebelumnya + `images (CLI -i)` di
+kedua provider.
+
+### Koreksi 5f
+
+5f menyatakan gambar di jalur non-OpenAI "model DIGANTI ke kimi" dan "base64 jadi teks". Kedua
+klaim itu **tidak tereproduksi** di sini, dan yang kedua terbukti salah sebagaimana dirumuskan:
+
+| klaim 5f | yang terukur sekarang |
+| --- | --- |
+| model diganti ke `kimi-k2.7-code` | `kimi` **0 kemunculan** di rollout; `model = ctx/...` bertahan |
+| base64 ditokenisasi sebagai teks, ~2,63 juta token | tidak ada `prompt too long`; satu run justru 10,9k token |
+| "gambar hilang bentuknya" | `input_image` **ada** di rollout (1–2 kemunculan), dan model bisa menyebut penanda |
+
+Yang benar-benar terjadi, dan berulang:
+
+- Run 1 (1093×6000): model memanggil `view_image` (fallback baca file dari disk), output tool
+  1 karakter, `task_complete` dengan `last_agent_message: null` — **tidak menjawab sama sekali**.
+  10.663 ms, 10.943 token.
+- Run 2 (fixture sama, prompt sama): model **melihat** gambar dan menyebut `WRANG8` di
+  penalarannya, lalu berputar-putar dan berhenti di **256.454 token** tanpa jawaban.
+- Run 3: lolos biasa.
+
+Pola yang konsisten: `ctx/*` **menerima** gambar, lalu kadang memburuk. Bukan penukaran model
+diam-diam, bukan tokenisasi base64. Instabilitasnya sendiri adalah masalahnya.
+
+Angka 5f yang tetap berdiri: `cx` ~17,2k vs 17,3k di sini, dan 11 gambar/12,5 MB → 30.361 token
+di jalur yang benar. Kesimpulan praktisnya tidak berubah — **pakai `cx/*` untuk gambar** — tapi
+alasannya harus ditulis ulang, bukan diwarisi.
+
+### Yang masih belum
+
+Attach gambar dari **composer app** tetap belum diuji; probe ini lewat CLI `-i`. Jalur CLI
+terbukti, jalur UI belum. Kalau mau menguji itu, launch clone lewat launcher dulu supaya
+config-nya kembali ke `cx/gpt-6.1-sol`.
 
 ## 5c. Banner "couldn't check Windows setup" — akar sebenarnya di REGISTRY
 
