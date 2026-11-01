@@ -12,7 +12,10 @@ PORT="${PORT:-4198}"
 BASE="http://127.0.0.1:${PORT}"
 PASS=0
 FAIL=0
+SKIP=0
 PID=""
+# State file read by qcheck so its verdict line can say `ok (1 skip)` rather than `ok`.
+SKIP_FILE="${TMPDIR:-/tmp}/codex-clone-quicktest.skips"
 
 cleanup() {
 	[ -n "$PID" ] && kill "$PID" 2>/dev/null
@@ -22,6 +25,7 @@ trap cleanup EXIT
 
 ok()   { printf '  PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  FAIL  %s\n' "$1"; FAIL=$((FAIL + 1)); }
+skip() { printf '  SKIP  %s\n' "$1"; SKIP=$((SKIP + 1)); }
 
 # check <label> <expected-substring> <curl args...>
 # An empty expected substring means "expect any real answer, not a transport error".
@@ -45,7 +49,29 @@ check() {
 	fi
 }
 
+# classify_convex <url> -> dead | empty | serving
+#
+#   dead    : nothing answers /version            -> the auth spec cannot run at all
+#   empty   : answers, but no functions pushed     -> the auth spec self-skips
+#   serving : answers and resolves functions       -> the auth spec really runs
+#
+# The URL used to be hardcoded to a dead port (:9999), which turned four security
+# assertions into a permanent silent skip while the step still printed PASS.
+classify_convex() {
+	local url="${1%/}" seen
+	curl -sS --max-time 3 -o /dev/null "$url/version" 2>/dev/null || { printf 'dead'; return; }
+	seen=$(curl -sS --max-time 5 -X POST "$url/api/query" \
+		-H 'Content-Type: application/json' \
+		-d '{"path":"devices:list","args":{},"format":"json"}' 2>/dev/null)
+	if printf '%s' "$seen" | grep -q 'Could not find public function'; then
+		printf 'empty'
+	else
+		printf 'serving'
+	fi
+}
+
 printf '\n=== codex-clone-placeholder quick test ===\n'
+
 printf 'commit: %s\n' "$(git rev-parse --short HEAD)"
 printf 'branch: %s\n\n' "$(git rev-parse --abbrev-ref HEAD)"
 
@@ -55,8 +81,32 @@ if npx eslint . >/dev/null 2>&1; then ok "eslint"; else bad "eslint"; fi
 if npx tsc --noEmit -p src/convex >/dev/null 2>&1; then ok "tsc -p src/convex"; else bad "tsc -p src/convex"; fi
 
 printf '\n[2/5] unit tests\n'
-if CONVEX_URL="${CONVEX_URL:-http://127.0.0.1:9999}" npx vitest run --reporter=dot >/tmp/clone-unit.log 2>&1; then
-	ok "vitest $(grep -oE 'Tests +[0-9]+ passed' /tmp/clone-unit.log | head -1)"
+# The Convex spec proves the auth boundary, but only against a deployment that serves
+# functions. Anything less and it either self-skips or fails on the empty deployment, so
+# classify first and never let that state render as PASS. This step must not fail because
+# the local deployment is empty — that is external state, not a repo defect — but it must
+# never be counted as proof either.
+CONVEX="${CONVEX_URL:-http://127.0.0.1:3210}"
+CONVEX_SPEC='src/convex/deployment.spec.ts'
+convex_state=$(classify_convex "$CONVEX")
+case "$convex_state" in
+dead) convex_why="no deployment answers (auth boundary NOT exercised)" ;;
+empty) convex_why="deployment has no functions pushed (auth boundary NOT exercised)" ;;
+serving) convex_why="" ;;
+esac
+
+if CONVEX_URL="$CONVEX" npx vitest run --reporter=dot >/tmp/clone-unit.log 2>&1; then
+	vitest_pass=$(grep -oE 'Tests +[0-9]+ passed' /tmp/clone-unit.log | head -1)
+	if [ -n "$convex_why" ]; then
+		skip "vitest ${vitest_pass#Tests } on $CONVEX — convex: $convex_why"
+	else
+		ok "vitest $vitest_pass"
+	fi
+elif [ -n "$convex_why" ] && [ "$(grep -cE '^ *FAIL .*src/convex/deployment\.spec\.ts' /tmp/clone-unit.log)" -gt 0 ] &&
+	! grep -E '^ *FAIL ' /tmp/clone-unit.log | grep -qv "$CONVEX_SPEC"; then
+	# Every failure belongs to the auth spec, which cannot pass without a serving
+	# deployment. Report the rest, and say out loud what was never proven.
+	skip "vitest $(grep -oE 'Tests +[0-9]+ passed' /tmp/clone-unit.log | head -1) on $CONVEX — convex: $convex_why"
 else
 	bad "vitest"
 	tail -15 /tmp/clone-unit.log
@@ -69,7 +119,7 @@ if [ "${1:-}" != "--no-build" ]; then
 		tail -20 /tmp/clone-build.log
 	fi
 else
-	printf '  SKIP  build (--no-build)\n'
+	skip "build (--no-build)"
 fi
 
 printf '\n[4/5] boot + feature probes\n'
@@ -119,5 +169,8 @@ else
 	tail -20 /tmp/clone-e2e.log
 fi
 
-printf '\n=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
+printf '\n=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"
+# ponytail: shared via a tmp file because qcheck is a separate process; fold the two scripts
+# together if a third reader ever needs this.
+printf '%d\n' "$SKIP" >"$SKIP_FILE"
 [ "$FAIL" -eq 0 ]
