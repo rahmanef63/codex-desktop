@@ -1,0 +1,92 @@
+
+########## codex-clone-placeholder ##########
+
+=== codex-clone-placeholder quick test ===
+commit: 14fda46
+branch: main
+
+[1/5] static gates
+  PASS  prettier
+  PASS  eslint
+  PASS  tsc -p src/convex
+
+[2/5] unit tests
+  PASS  vitest Tests  159 passed
+
+[3/5] build
+  PASS  bun run build
+
+[4/5] boot + feature probes
+  PASS  server booted on :4198
+  PASS  shell renders (menubar)
+  PASS  shell hydrates (Svelte boot)
+  PASS  GET /api/ai/config
+  PASS  GET /api/mcp/server (POST-only)
+  PASS  GET /robots.txt
+  PASS  GET /sitemap.xml
+  PASS  disabled AI chat refuses
+
+[5/5] browser smoke (desktop viewport)
+  PASS  playwright dev-smoke 4 passed
+
+=== 14 passed, 0 failed ===
+
+########## codex real (chatgpt vs 9router) ##########
+
+=== codex real quick test ===
+exe: C:\Users\rahma\AppData\Local\OpenAI\Codex\bin\22cfb1d302613eae\codex.exe
+
+--- chatgpt
+  PASS  chatgpt / chat
+  PASS  chatgpt / exec
+  SKIP  chatgpt / mcp  (no probe MCP server in the base config)
+
+--- 9router
+  PASS  9router / chat
+  PASS  9router / exec
+  PASS  9router / mcp
+
+=== 5 passed, 0 failed ===
+note: the mcp probe needs the echo server in the 9router profile:
+      ~/.local/share/codex-9router/mcp_echo.py
+
+########## codex capabilities ##########
+
+=== codex capability matrix ===
+
+--- chatgpt
+  PASS  chat                   verified
+  PASS  exec                   verified
+  PASS  file write+read        verified
+  PASS  apply_patch            verified
+  PASS  apply_patch (on disk)  file content confirmed
+  PASS  artifact html          verified
+  PASS  artifact html (on disk) fragment content confirmed
+  PASS  parallel tools         verified
+  PASS  sub-agents             verified
+  PASS  web search             verified
+  PASS  clock                  verified
+  SKIP  browser (in-app)       blocked: needs an app host pipe; CLI has none
+  SKIP  computer use           blocked: per-app approval happens in the ChatGPT UI
+
+--- 9router
+  PASS  chat                   verified
+  PASS  exec                   verified
+  PASS  file write+read        verified
+  PASS  apply_patch            verified
+  PASS  apply_patch (on disk)  file content confirmed
+  PASS  artifact html          verified
+  PASS  artifact html (on disk) fragment content confirmed
+  PASS  parallel tools         verified
+  PASS  sub-agents             verified
+  SKIP  web search             hosted OpenAI tool, no gateway equivalent
+  SKIP  clock                  namespace tool, no gateway equivalent
+  SKIP  browser (in-app)       blocked: needs an app host pipe; CLI has none
+  SKIP  computer use           blocked: per-app approval happens in the ChatGPT UI
+
+=== 20 passed, 0 failed ===
+
+########## verdict ##########
+  clone : ok
+  codex : ok
+  caps  : ok

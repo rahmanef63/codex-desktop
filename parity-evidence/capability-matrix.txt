@@ -3,6 +3,12 @@ Capability matrix — parallel tools, sub-agents, browser in-app, computer use
 Measured 2026-10-31, OpenAI.Codex 26.1027.3384.0. Re-verified after the 9router
 profile default changed from deepseek-v4.1-flash-free to cx/gpt-6.1-sol.
 
+Full re-run 2026-11-01 (bin/qcheck, catalog since changed): 20 passed, 0 failed,
+6 skipped. Sub-agents PASS on 9router with the profile on cx/gpt-6.1-sol; the
+verdicts below are unchanged. Raw log: parity-evidence/qcheck-2026-11-01.txt.
+Still untested: an image turn through the clone's app UI (CLI image path is
+proven, composer attach is not).
+
   capability        chatgpt                 9router
   ----------------  ----------------------  --------------------------------
   parallel tools    PASS                    PASS (Promise.allSettled in exec)

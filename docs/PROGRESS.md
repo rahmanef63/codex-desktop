@@ -4,7 +4,7 @@ Catatan kerja, bukan dokumentasi produk. Ditulis supaya sesi berikutnya tidak me
 penyelidikan yang sama. Repo produk ada di `/home/rahman/projects/lara/codex-clone-placeholder`;
 berkas ini soal setup mesin, bukan repo.
 
-Terakhir diperbarui: 2026-10-31, setelah swap home clone.
+Terakhir diperbarui: 2026-11-01, setelah `qcheck` penuh (5h).
 
 ## Status ringkas
 
@@ -124,11 +124,59 @@ semua path `/v1*`. Bukan regresi di sisi app.
 
 ## 5. Yang belum
 
-1. `codex-caps-quicktest` sudah punya probe sub-agent + parallel, tapi belum dijalankan penuh
-   sejak katalog diubah.
-2. `Access is denied (os error 5)` pada refresh plugin cache `chrome@openai-bundled` — muncul
-   tiap start, belum mengganggu chat/tool. Prioritas rendah.
+1. ~~`codex-caps-quicktest` belum dijalankan penuh sejak katalog diubah.~~ **SELESAI 2026-11-01**
+   — lihat 5h. Verdict `20 passed, 0 failed, 6 skipped`.
+2. ~~`Access is denied (os error 5)` pada refresh plugin cache `chrome@openai-bundled`.~~
+   **SELESAI** — akar dan perbaikannya di 5g.
 3. Bearer token 9router masih plaintext di profil dan sudah muncul di transkrip — rotasi belum.
+4. **Turn bergambar lewat UI belum pernah diuji di `.codex-clone`.** Jalur CLI dengan
+   `CODEX_HOME` clone sudah terbukti (5f), tapi attach-gambar dari composer app belum.
+   Prasyarat: launch lewat `codex-launch.ps1 -Mode clone`, karena config clone saat ini
+   tertinggal di `ctx/*` (lihat 5h).
+
+## 5h. `qcheck` penuh 2026-11-01 — verdict apa adanya
+
+Dijalankan dari repo, log mentah: `parity-evidence/qcheck-2026-11-01.txt` (92 baris). Exit 0.
+
+```
+########## verdict ##########
+  clone : ok
+  codex : ok
+  caps  : ok
+```
+
+| sisi | hasil |
+| --- | --- |
+| clone (`codex-clone-placeholder` @ `14fda46`) | 14 passed, 0 failed |
+| codex real | 5 passed, 0 failed (chatgpt: chat+exec, mcp SKIP tanpa server) |
+| caps | 20 passed, 0 failed, 6 skipped |
+
+Caps — run penuh pertama sejak katalog berubah:
+
+| kapabilitas | ChatGPT | 9router |
+| --- | --- | --- |
+| chat, exec, file write+read, `apply_patch`, artifact html, parallel tools | PASS | PASS |
+| sub-agents | PASS | **PASS** |
+| web search, clock | PASS | SKIP (hosted / namespace) |
+| browser in-app, computer use | SKIP | SKIP |
+
+Assertion disk tetap yang menentukan, bukan ucapan model: `cap-patch.txt` = `CAP-PATCH-OK`,
+`cap-visual.html` memuat `CAP-VISUAL-OK`. Sub-agent PASS di 9router konsisten dengan profil
+`cx/gpt-6.1-sol` (5f) — bukan bukti baru soal gateway, hanya konfirmasi bahwa pin itu bertahan.
+
+**Temuan sampingan, belum diperbaiki:** `.codex-clone/config.toml` baris 31 =
+`model = "ctx/ollama/deepseek-v4.1-flash:1017-cloud"`, ditulis 10:57 — sesudah launcher terakhir
+jalan 08:23. Launcher menegakkan `cx/gpt-6.1-sol` tiap run, jadi luncuran clone berikutnya
+memulihkan sendiri. Tapi **sekarang** home clone sedang terpaku ke `ctx/*`, jalur yang di 5f
+terbukti menukar model diam-diam ke `kimi-k2.7-code` dan menokenisasi base64 sebagai teks.
+Menguji turn bergambar lewat UI tanpa lewat launcher lebih dulu akan mereproduksi 5f, bukan
+menguji clone. `Set-CloneWindowsSandboxElevated` dan `Set-ClonePluginDisabled` sudah benar
+sekarang (`sandbox = "elevated"`, `chrome@openai-bundled enabled = false`).
+
+**Launcher hidup ≠ launcher repo.** `C:\Users\rahma\OneDrive\Desktop\codex-launch.ps1` masih
+hard-code `C:\Users\rahma\.codex` / `.codex-clone`; versi repo menerima `-RealHome`/`-CloneHome`.
+Perilakunya identik, jadi tidak ada yang perlu diperbaiki — sudah tercatat di bagian Rollback
+handover.
 
 ## 5c. Banner "couldn't check Windows setup" — akar sebenarnya di REGISTRY
 
