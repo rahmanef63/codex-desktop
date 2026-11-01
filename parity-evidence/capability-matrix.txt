@@ -35,6 +35,24 @@ Captured request body, gateway side, members intact (6 of them):
             {"type":"function","name":"spawn_agent",...},
             {"type":"function","name":"wait_agent",...}]}
 
+CORRECTION (2026-11-01, from the Rust binary — see codex-web
+docs/rea-rust-binaries.md): 6 is what THIS capture carried, not what the client
+declares. codex.exe contains two member lists:
+
+  spawn_agent assign_agent_task send_message wait_agent close_agent
+  followup_task wait_agent interrupt_agent list_agents create_channel get_channels
+  list_threads search_posts read_thread read_post subscribe unsubscribe post
+
+That is a sub-agent control group plus a message board (channels, threads, posts,
+subscriptions) — at least ten distinct members, not six. So:
+  - the flattening is worse than measured: ten members collapse to one function;
+  - a gateway fix that special-cases only the six names above is INCOMPLETE;
+  - per-model flags sit beside them: expose_spawn_agent_model_overrides,
+    wait_agent_enabled, disable_native_tools, disable_direct_message,
+    message_board_in_memory | message_board_remote, non_code_mode_only.
+The observed symptom is unchanged and so is the fix that works today (OpenAI-native
+upstream). Only the scope of the gateway-side fix was understated.
+
   tool_choice: "auto" — no restriction. Not the cause.
 
 Synthetic-namespace test settles it. A namespace with one unique member name
