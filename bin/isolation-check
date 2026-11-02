@@ -96,16 +96,24 @@ md5_of() {
 	printf '%s\n' "$h"
 }
 
-# Prints one PID per line, sorted. Returns non-zero when the process list cannot be read at all —
-# which is different from "no ChatGPT running", and must not be treated as success.
+# Prints one PID and process name per line, tab-separated, sorted by PID. Returns non-zero when the
+# process list cannot be read at all — which is different from "no ChatGPT running", and must not
+# be treated as success.
+#
+# The name is recorded because PID membership alone cannot tell a restarted chat renderer from a
+# dead application. Chromium spawns and reaps renderers constantly; the app process is what must
+# survive. Comparing PID sets made every renderer recycle look like a killed account.
 list_pids() {
 	local out
 	out=$(powershell.exe -NoProfile -Command \
-		"Get-Process | Where-Object {\$_.ProcessName -match '$PROC_RE'} | Select-Object -ExpandProperty Id" \
+		"Get-Process | Where-Object {\$_.ProcessName -match '$PROC_RE'} | ForEach-Object { \"\$(\$_.Id)\`t\$(\$_.ProcessName)\" }" \
 		2>/dev/null) || return 1
-	printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+$' | sort -n -u
+	printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+\s' | sort -n -u -k1,1
 	return 0
 }
+
+# Just the numbers, for counting and for the "cannot read" check.
+list_pid_numbers() { list_pids | cut -f1; }
 
 snap_field() { # snap_field <key> <second-field>
 	awk -F'\t' -v k="$1" -v f="$2" '$1 == k && $2 == f { print $3; exit }' "$SNAPSHOT_FILE"
@@ -150,7 +158,8 @@ cmd_snapshot() {
 		printf 'sessions\t.codex-probe\t%s\n' "$n_probe"
 		printf 'md5\t.codex/config.toml\t%s\n' "$md5_cfg"
 		printf 'md5\t.codex/auth.json\t%s\n' "$md5_auth"
-		printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sed 's/^/pid\t/'
+		# `pid<TAB>number<TAB>name` — the name lets verify tell a recycled renderer from a dead app.
+		printf '%s\n' "$pids" | grep -E '^[0-9]+\s' | awk -F'\t' '{ printf "pid\t%s\t%s\n", $1, $2 }'
 	} >"$SNAPSHOT_FILE" || {
 		bad "cannot write $SNAPSHOT_FILE"
 		summary
@@ -159,7 +168,7 @@ cmd_snapshot() {
 	info "real home sessions: $n_real"
 	info "clone home sessions: $n_clone"
 	info "probe home sessions: $n_probe (allowed to grow)"
-	info "pre-existing PIDs recorded: $(printf '%s\n' "$pids" | grep -cE '^[0-9]+$')"
+	info "pre-existing PIDs recorded: $(printf '%s\n' "$pids" | grep -cE '^[0-9]+\s')"
 	ok "snapshot written to $SNAPSHOT_FILE"
 	summary
 }
@@ -241,14 +250,30 @@ cmd_verify() {
 	elif ! cur=$(list_pids); then
 		bad "pre-existing PIDs ($want recorded) — cannot read the process list, so unverifiable"
 	else
-		# Compared by membership, not by order; PID reuse is not detected. Cheap and enough:
-		# a probe that kills the real app kills it for the whole run, not for a few seconds.
-		died=$(awk 'NR == FNR { cur[$1]; next } !($1 in cur)' \
-			<(printf '%s\n' "$cur") <(printf '%s\n' "$was_pids"))
-		if [ -z "$died" ]; then
-			ok "all $want pre-existing PIDs still alive"
+		# A recorded process counts as alive when its name is still running, even under a new PID.
+		# Chromium recycles its renderers constantly, so exact-PID matching reported a healthy app
+		# as killed every time a chat window was recreated. What must not happen is a process *name*
+		# disappearing while the account is supposed to be running.
+		#
+		# Names are compared, not PIDs, so a renderer restart under a new PID is not a death — but a
+		# name that vanishes entirely is. PID reuse is still not detected; that would need start
+		# times, and a probe does not run long enough for recycling to matter.
+		local cur_names was_names gone_names
+		cur_names=$(printf '%s\n' "$cur" | cut -f2 | sort -u)
+		was_names=$(awk -F'\t' '$1 == "pid" { print $3 }' "$SNAPSHOT_FILE" | grep -v '^$' | sort -u)
+		if [ -z "$was_names" ]; then
+			# An older snapshot recorded numbers only; fall back to membership so it still works.
+			died=$(awk 'NR == FNR { cur[$1]; next } !($1 in cur)' \
+				<(printf '%s\n' "$cur" | cut -f1) <(printf '%s\n' "$was_pids"))
 		else
-			bad "pre-existing PIDs gone: $(printf '%s' "$died" | tr '\n' ' ')"
+			gone_names=$(comm -23 <(printf '%s\n' "$was_names") <(printf '%s\n' "$cur_names"))
+			died=$(awk -F'\t' -v gone="$(printf '%s' "$gone_names" | tr '\n' ' ')" \
+				'$1 == "pid" { n = $3; if (n != "" && index(" " gone " ", " " n " ")) print $2 }' "$SNAPSHOT_FILE")
+		fi
+		if [ -z "$died" ]; then
+			ok "all $want pre-existing processes still running by name"
+		else
+			bad "pre-existing processes gone: $(printf '%s' "$died" | tr '\n' ' ')"
 		fi
 	fi
 

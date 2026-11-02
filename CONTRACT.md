@@ -43,8 +43,9 @@ real problem that took time to find.
     check the exit code, inspect the row.
 12. **Never run Codex from `C:\Users\rahma`.** `~/.codex/config.toml` is then read as
     project-local config and silently overrides the profile under test.
-13. **Do not touch the real account when testing the clone.** Record the pre-existing process IDs
-    first, and verify every one survives.
+13. **Do not touch the real account when testing the clone.** Record the pre-existing processes
+    first — by name as well as by PID, because Chromium recycles renderers constantly and an
+    exact-PID comparison reports a healthy app as killed — and verify every process name survives.
 
 ## Known traps
 

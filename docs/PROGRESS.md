@@ -699,9 +699,12 @@ proses list tak terbaca, atau snapshot milik `USERPROFILE_WSL` lain → FAIL + e
 
 ### Batasnya, dinyatakan
 
-- Perbandingan PID berbasis keanggotaan, bukan urutan, dan **tidak** mendeteksi PID reuse. Cukup
-  untuk kasus yang sebenarnya dikejar: probe yang membunuh app asli membunuhnya untuk seluruh
-  run, bukan beberapa detik.
+- Perbandingan proses **berdasarkan nama**, bukan PID, sejak 2026-11-02. Revisi pertama membandingkan
+  PID persis dan melaporkan app yang sehat sebagai mati setiap kali sebuah renderer Chromium
+  didaur ulang — terukur: satu probe penuh menghasilkan `FAIL pre-existing PIDs gone: 36600`
+  sementara 17 proses ChatGPT masih hidup. Nama proses yang hilang seluruhnya tetap FAIL.
+- PID reuse **masih** tidak terdeteksi; itu butuh waktu mulai proses, dan probe tidak berjalan
+  cukup lama untuk peduli.
 - Kalau tak ada proses cocok sama sekali, invariant 5 dilaporkan INFO, bukan PASS diam-diam —
   daftar kosong tidak membuktikan apa pun soal isolasi.
 - Skrip **tidak menulis apa pun** ke `~/.codex*`: hanya `find`, `md5sum`, `powershell.exe`.
