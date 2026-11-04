@@ -26,7 +26,7 @@ Terakhir diperbarui: 2026-11-02, setelah `bin/isolation-check` (bagian 8).
 
 ## 1. Dua mode, satu binary
 
-Codex Desktop (MSIX `OpenAI.Codex 26.1027.3384.0`) membaca home dari `CODEX_HOME`, fallback
+Codex Desktop (MSIX `OpenAI.Codex 26.1029.7803.0`) membaca home dari `CODEX_HOME`, fallback
 `homedir()/.codex`. Tiga hal wajib berpasangan:
 
 | hal | fungsi |

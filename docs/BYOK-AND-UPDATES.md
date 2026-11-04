@@ -47,7 +47,12 @@ It reports, it never blocks a launch. What it watches:
 | catalog entries missing `tool_mode` / `use_responses_lite` | tool calling breaks on that entry (CONTRACT §8) |
 | MSIX identity + version | an app update. Expected; the launcher re-asserts its keys on the next clone launch |
 
-Measured on this machine: 56 config keys, 80 catalog models, app `26.1027.3384.0`.
+Measured on this machine (2026-11-04): 58 config keys, 80 catalog models, app `26.1029.7803.0`.
+
+> Version history observed here: `26.1027.3384.0` -> `26.1029.7803.0` (Microsoft Store,
+> no public manifest: `manifestSearch` for `OpenAI.Codex` returns an empty `Data` array,
+> so the newest available build cannot be read from outside. `codex-version-drift record`
+> is the source of truth for what is installed.
 A deleted `model_provider` line is caught as `config-keys-removed` **and**
 `load-bearing-key-vanished`.
 
