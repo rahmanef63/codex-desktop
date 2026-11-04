@@ -1,6 +1,8 @@
 param(
+    # Clone is the default: this machine's default is BYOK (9router), not the ChatGPT account.
+    # `-Mode real` stays available for the real account and is never touched by clone runs.
     [ValidateSet('real', 'clone')]
-    [string]$Mode = 'real',
+    [string]$Mode = 'clone',
     # Where the real ChatGPT home lives. Default: %USERPROFILE%\.codex
     [string]$RealHome = '',
     # Where the isolated clone home lives. Default: %USERPROFILE%\.codex-clone
@@ -82,6 +84,46 @@ function Set-CloneWindowsSandboxElevated($configPath) {
 # pick. In the clone that lands on a ChatGPT-only slug the nine_router provider cannot serve,
 # which surfaces as "Invalid model metadata". Re-assert both on every clone run. Only the
 # two top-level keys are touched; every [section] below them is left alone.
+function Set-CloneTopLevel($configPath, $key, $value) {
+    # Rewrite ONE top-level key, leaving every other byte alone (CONTRACT §5). Used for keys
+    # the app never writes, where "already correct" must be a no-op instead of a rewrite.
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $raw = [System.IO.File]::ReadAllText($configPath, $utf8)
+    $newline = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $endsWithNewline = $raw.EndsWith("`n")
+    $suffix = if ($endsWithNewline) { $newline } else { '' }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.AddRange([string[]]($raw -split "`r?`n"))
+    if ($endsWithNewline) { $lines.RemoveAt($lines.Count - 1) }
+
+    $line = $key + ' = "' + $value.Replace('\', '\\') + '"'
+    $pattern = '^' + [regex]::Escape($key) + '\s*='
+    $inSection = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $trimmed = $lines[$i].Trim()
+        if ($trimmed -match '^\[[^\[\]]+\]$') { $inSection = $true; continue }
+        if ($inSection) { continue }
+        if ($trimmed -match $pattern) {
+            if ($lines[$i] -ceq $line) { return }
+            $lines[$i] = $line
+            [System.IO.File]::WriteAllText($configPath, (($lines -join $newline) + $suffix), $utf8)
+            Write-Host "$key set"
+            return
+        }
+    }
+
+    # Absent: insert before the first table so it lands top-level.
+    $first = $lines.Count
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -match '^\[') { $first = $i; break }
+    }
+    if ($first -gt 0 -and $lines[$first - 1].Trim() -eq '') { $lines.Insert($first - 1, $line) }
+    else { $lines.Insert($first, $line) }
+    [System.IO.File]::WriteAllText($configPath, (($lines -join $newline) + $suffix), $utf8)
+    Write-Host "$key added"
+}
+
 function Set-CloneModel($configPath, $model, $provider) {
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     $raw = [System.IO.File]::ReadAllText($configPath, $utf8)
@@ -240,32 +282,30 @@ if ($Mode -eq 'clone') {
         }
         Write-Host "using BYOK profile: $Profile$(if ($Model) { ' (model override: ' + $Model + ')' })"
     } else {
-        # Default clone model = deepseek-v4.1-flash-free, measured equal to cx on every probe
-# this repo runs (chat, exec, MCP, sub-agent, image, multi-function code edit).
-# Keep image support in mind: cx is the safe fallback if an upstream image path regresses.
-        # Measured 2026-11-01: images on a non-OpenAI upstream are UNSTABLE. cx answered 3/3 at
-        # ~17.3k tokens; ctx/* answered 1/3, failures ending with no answer at all (view_image then
-        # quit, or a 256k-token loop). An earlier revision of this comment blamed a silent swap to
-        # kimi-k2.7-code plus text-tokenised base64; that did not reproduce (PROGRESS 5i). cx keeps
-        # input_image intact. Sub-agents also work here, unlike the ctx/* entries, whose
-        # collaboration namespace the gateway flattens.
-        # Default model for a clone launch: deepseek-v4.1-flash-free on this gateway. Measured
-        # 2026-11-05 against cx/gpt-6.1-sol on the same tasks: chat, exec, MCP, sub-agent,
-        # image and a three-function code edit all pass on both. The plain slug is the one
-        # that works through the Codex path; `oc/deepseek-v4.1-flash-free` answers bare
-        # /chat/completions but the Codex path never connects ("Reconnecting... 1/5"), so it
-        # looks healthy while doing nothing. The ctx/* copies also work but are the ones the
-        # notes above warn about for images, and they cost more tokens for the same answer.
-        # model_instructions_file in the profile keeps its chatty reasoning out of stdout:
-        # without it a sub-agent turn leaked its deliberation and cost 50k tokens vs 38k.
+        # Default clone model: deepseek-v4.1-flash-free on this gateway (PROGRESS §12). Measured
+        # 2026-11-05 against cx/gpt-6.1-sol on chat, exec, MCP, sub-agent, image and a
+        # three-function code edit: passes on both. The plain slug is the one that works through
+        # the Codex path; `oc/deepseek-v4.1-flash-free` answers bare /chat/completions but the
+        # Codex path never connects ("Reconnecting... 1/5"), so it looks healthy while doing
+        # nothing — that is why oc/* is hidden in the catalog now.
+        # cx is the fallback: it keeps input_image intact, where the ctx/* copies were
+        # unstable on images (1/3) and cost more tokens for the same answer.
+        # `-Model ...` still overrides this for one launch.
         Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'deepseek-v4.1-flash-free' }) 'nine_router'
     }
 
-    # Catalog: the clone must read its own copy, not the real home's.
+    # Catalog: the clone must read its own copy, not the real home's. Refresh it when the real
+    # home's copy is newer — otherwise a regenerated catalog (truncation limit, verbosity,
+    # hidden models) never reaches the clone and every fix here only lands on the real side.
     $targetCatalog = Join-Path $cloneHome 'nine-router-models.json'
+    $sourceCatalog = Join-Path $realHome 'nine-router-models.json'
     if (-not (Test-Path -LiteralPath $targetCatalog)) {
-        Copy-Item -LiteralPath (Join-Path $realHome 'nine-router-models.json') -Destination $targetCatalog
+        Copy-Item -LiteralPath $sourceCatalog -Destination $targetCatalog
         Write-Host 'seeded nine-router-models.json'
+    } elseif ((Test-Path -LiteralPath $sourceCatalog) -and
+        ((Get-Item -LiteralPath $sourceCatalog).LastWriteTimeUtc -gt (Get-Item -LiteralPath $targetCatalog).LastWriteTimeUtc)) {
+        Copy-Item -LiteralPath $sourceCatalog -Destination $targetCatalog -Force
+        Write-Host 'refreshed nine-router-models.json from the real home'
     }
 
     # Real copies (NOT links). Plugins are needed because the app loads them from the home.
@@ -275,6 +315,26 @@ if ($Mode -eq 'clone') {
             Copy-Tree (Join-Path $realHome $dir) $dst
             Write-Host "copied $dir"
         }
+    }
+
+    # The clone config was seeded before `model_instructions_file` existed, so deepseek there
+    # leaks its deliberation into stdout and burns ~12k extra tokens per sub-agent turn.
+    # Point it at the real home's file, which the launcher already keeps current.
+    $instrPath = Join-Path $realHome '9router.instructions.md'
+    if (Test-Path -LiteralPath $instrPath) {
+        Set-CloneTopLevel $targetConfig 'model_instructions_file' $instrPath
+    }
+
+    # The clone's global AGENTS.md was 0 bytes, so the model ran with no project rules at all:
+    # no UNC workaround, no batching rule, nothing about the 3-agent limit or the 60 s wait
+    # ceiling that ended turns mid-task. Seed it from the repo, and refill it if it is empty.
+    # Never overwrite a file the user has since edited.
+    $agentsMd = Join-Path $cloneHome 'AGENTS.md'
+    $agentsSeed = Join-Path $PSScriptRoot 'clone-AGENTS.md'
+    if ((Test-Path -LiteralPath $agentsSeed) -and
+        (-not (Test-Path -LiteralPath $agentsMd) -or (Get-Item -LiteralPath $agentsMd).Length -eq 0)) {
+        Copy-Item -LiteralPath $agentsSeed -Destination $agentsMd -Force
+        Write-Host 'seeded AGENTS.md'
     }
 
     # Per-mode state starts empty. This is the whole point of the split.

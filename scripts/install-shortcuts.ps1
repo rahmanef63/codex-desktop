@@ -30,10 +30,11 @@ $ErrorActionPreference = 'Stop'
 
 # One shortcut per mode. Four was two modes times two copies (Desktop launcher vs repo
 # launcher), and the duplication is what made "many Codex" on the desktop. Mode is the only
-# real axis, so one shortcut per mode.
+# real axis, so one shortcut per mode — and clone (BYOK) comes first because it is this
+# machine's default. `codex-launch.ps1` defaults to -Mode clone too; both agree on purpose.
 $Shortcuts = @(
-    @{ Name = 'Codex';       Mode = 'real';  Icon = 'exe'; Description = 'Codex Desktop - real mode, own ChatGPT account' }
     @{ Name = 'Codex Clone'; Mode = 'clone'; Icon = 'ico'; Description = 'Codex Desktop - clone mode, 9router gateway, isolated home' }
+    @{ Name = 'Codex';       Mode = 'real';  Icon = 'exe'; Description = 'Codex Desktop - real mode, own ChatGPT account' }
 )
 
 if (-not $RepoRoot) {

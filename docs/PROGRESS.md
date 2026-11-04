@@ -940,3 +940,45 @@ upstream regresi. `-Model cx/gpt-6.1-sol` per launch tidak diubah perilakunya.
   dua run dengan tugas sama bisa beda karena cache konteks (terlihat: 16.988 vs 3.804).
 - Instruksi menentukan **gaya keluaran**, bukan kualitas penalaran. Pada tugas yang lebih
   sulit dari probe di atas, selisih cx vs deepseek belum diukur dan tidak diklaim.
+
+## 13. Default jadi BYOK (clone), plus empat sebab "kerja cuma sebentar" (2026-11-05)
+
+Permintaan: "tetapkan semua kecuali 3, defaultnya byok, defaultnya deepseek". Nomor 3 di
+daftar analisis adalah "pindah ke `cx/gpt-6.1-sol`" — itu **tidak** dilakukan. Sisanya ya.
+
+### Apa yang menetap
+
+| berkas | perubahan | efek |
+| --- | --- | --- |
+| `scripts/codex-launch.ps1` | `-Mode` default `clone` | luncuran tanpa flag = BYOK/9router, bukan akun ChatGPT |
+| `scripts/install-shortcuts.ps1` | `Codex Clone` lebih dulu di daftar | shortcut pertama yang terlihat = default |
+| `bin/codex-9router-catalog` | `truncation_policy.limit` 10.000 → 40.000 | baca file besar tidak lagi buta 94% |
+| idem | `default_verbosity` `low` → `medium` | jawaban tidak lagi terasa tipis |
+| idem | `oc/*` → `visibility: "hide"` | entri yang balas 429 tak lagi ditawarkan |
+| `scripts/clone-AGENTS.md` (baru) | aturan WSL/UNC, batching, batas 3 agent, `wait_agent` 600 s | klon tidak lagi berhenti karena timeout 60 s |
+| `scripts/codex-launch.ps1` | seed `AGENTS.md` klon kalau kosong; `Set-CloneTopLevel` untuk `model_instructions_file` | klon punya aturan yang sama dengan home asli |
+| `app/tests/test-toplevel.ps1` (baru) | 3 assert: insert, no-op, rewrite | fungsi edit-konfigurasi terbukti tidak merusak byte lain |
+
+### Bukti, bukan klaim
+
+| probe | hasil |
+| --- | --- |
+| `codex exec` dengan `CODEX_HOME` klon | `provider nine_router`, `model deepseek-v4.1-flash-free`, `effort high` (dibaca dari `turn_context` rollout baru) |
+| pertanyaan batas agent | dijawab "max 3 sub-agents; wait_agent timeout_ms 600000" — `AGENTS.md` klon terbaca |
+| `tests/isolation-check.sh` | 12 passed |
+| `tests/instruct-contract.sh` | 12 passed |
+| `app/tests/run-tests.mjs` | 5/5 |
+| `tests/shortcut-contract.sh` (+ `--selftest`) | 11 passed / 7 passed |
+| `app/tests/test-toplevel.ps1` | 3/3 PASS |
+
+Catatan probe: `CODEX_HOME` yang diekspor dari bash **tidak** terbawa ke `codex.exe` (proses
+Windows). Dua run pertama saya salah sasaran dan tercatat di home asli (`provider openai`,
+`gpt-6.1-sol`). Probe yang benar menyetel `$env:CODEX_HOME` di dalam PowerShell.
+
+### Yang sengaja dibiarkan
+
+- `model_reasoning_effort = "high"` di klon: effort bukan penyebabnya, dan sudah terbukti
+  sampai ke upstream (probe `/v1/responses`: low 5.5k vs high 21.8k token output).
+- Translator 9router (`type:"namespace"`, `encrypted_content`): perbaikan gateway, bukan repo
+  ini. Tanpa itu, penalaran antar-turn tetap tidak terbawa untuk upstream non-OpenAI.
+- `cx/gpt-6.1-sol` tetap ada sebagai fallback gambar.

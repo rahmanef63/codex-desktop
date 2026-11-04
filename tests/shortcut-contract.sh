@@ -200,8 +200,9 @@ exists() {
 #                 the visible symptom of the MSIX version bump, not a cosmetic issue.
 #   R4 msix-pin — no path may embed OpenAI.Codex_<version>_: Store updates move that folder, so
 #                 every pinned path rots on the next update. Resolve it at run time instead.
-#   R5 mode     — the launcher's only required argument. Absent or mistyped, it defaults to
-#                 real mode and a clone shortcut quietly opens the real account.
+#   R5 mode     — the launcher's only required argument. Absent or mistyped, the shortcut
+#                 inherits whatever default the launcher happens to carry (clone since
+#                 2026-11-05), so the click no longer says which account it opens.
 #   R6 duplicate— two shortcuts for the same script+mode: one of them is unmaintained, and
 #                 which one the user clicks is luck.
 
@@ -242,7 +243,7 @@ check_shortcut() { # check_shortcut <file>
 	mode_vals=$(printf '%s' "$mode_vals" | sed 's/ *$//')
 	case "$mode_vals" in
 	real | clone) ok "$base: R5 mode is '$mode_vals'" ;;
-	'') no "$base: R5 no -Mode argument (the launcher then defaults to real mode)" ;;
+	'') no "$base: R5 no -Mode argument (the launcher's own default would decide)" ;;
 	*' '*) no "$base: R5 more than one -Mode argument: $mode_vals" ;;
 	*) no "$base: R5 mode '$mode_vals' is not real or clone" ;;
 	esac

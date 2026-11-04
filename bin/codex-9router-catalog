@@ -61,6 +61,9 @@ def build_entry(template, slug, cap, priority):
         display_name=f"{slug} \u00b7 9router",
         description="9router upstream",
         priority=priority,
+        # oc/* answers 429 FreeUsageLimitError with a ~30k-second retry-after: it is listed by
+        # /v1/models but cannot serve. Hide it so the model picker stops offering a dead entry.
+        visibility="hide" if slug.startswith("oc/") else "list",
         # --- tool calling: the two load-bearing fields ---
         tool_mode="code_mode_only",
         use_responses_lite=False,
@@ -76,7 +79,13 @@ def build_entry(template, slug, cap, priority):
         # --- limits ---
         context_window=ctx,
         max_context_window=ctx,
-        truncation_policy={"mode": "tokens", "limit": min(10000, out_tokens)},
+        # 10000 was too small: on 2026-11-05 eight tool outputs in one clone session were cut,
+        # the largest at 166854 tokens, so the model read 6% of a file and re-read it. 40000
+        # keeps a full source file in one result without inviting the truncation loop back.
+        truncation_policy={"mode": "tokens", "limit": min(40000, out_tokens)},
+        # Answers read thin at "low", and the cost difference on the same probe was noise
+        # (low 5531 vs high 21844 output tokens is effort, not verbosity).
+        default_verbosity="medium",
         # --- keep plugin/app instructions: that is what makes MCP + skills usable ---
         include_plugin_usage_instructions=True,
         include_apps_usage_instructions=True,

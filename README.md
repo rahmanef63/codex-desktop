@@ -102,14 +102,15 @@ day rediscovering them.
 The launcher expects the app installed and a profile at `~/.codex/9router.config.toml`.
 
 ```powershell
-# clone mode: first run seeds ~/.codex-clone from the profile and copies plugins/skills.
-powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1 -Mode clone
+# clone mode is the default: bare launch seeds ~/.codex-clone from the profile and copies
+# plugins/skills. It runs on the 9router gateway (BYOK), never the ChatGPT account.
+powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1
 
-# real mode: untouched ChatGPT home.
+# real mode: untouched ChatGPT home. Explicit on purpose, never the default.
 powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1 -Mode real
 ```
 
-Create desktop shortcuts that pass `-Mode real` and `-Mode clone`:
+Create desktop shortcuts that pass `-Mode clone` and `-Mode real`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1
