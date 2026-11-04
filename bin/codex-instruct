@@ -309,6 +309,11 @@ def cmd_set(args):
     print(f"file     {target}")
     print(f"stored   {stored}")
     print("")
+    print("WARNING: this key REPLACES the Codex prompt, it does not add to it. Measured")
+    print("         2026-11-05: base_instructions 388 chars with it vs 21638 without, so an")
+    print("         instruction file that only lists house rules deletes the agent's ability")
+    print("         to finish a task. For additional rules use $CODEX_HOME/AGENTS.md instead.")
+    print("")
     print(f"Verify:  codex -p {args.profile} exec 'say hello'")
     return 0
 
