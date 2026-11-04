@@ -113,7 +113,7 @@ def main():
     # DEFAULT_MODEL wins priority 0; that is the model the clone opens with, so a
     # regeneration must not silently move it. Everything else keeps the historical
     # order: plain slugs first, then the `ctx/` prefixed ones, each alphabetical.
-    default = os.environ.get("DEFAULT_MODEL", "cx/gpt-6.1-sol")
+    default = os.environ.get("DEFAULT_MODEL", "deepseek-v4.1-flash-free")
     ordered = sorted(live, key=lambda s: (s != default, s.startswith("ctx/"), s))
     if default not in live:
         print(f"warn: DEFAULT_MODEL {default} not served by the gateway; priority 0 is {ordered[0]}")

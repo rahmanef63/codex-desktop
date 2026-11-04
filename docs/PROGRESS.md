@@ -868,3 +868,75 @@ Keduanya hanya ketahuan karena dijalankan pada home nyata, bukan fixture.
 - Token dibaca untuk autentikasi, tidak pernah dicetak.
 - `--fast` melewati probe jaringan, untuk dipakai offline atau di CI.
 - Exit 0 sehat, 1 ada yang gagal, 2 tidak bisa jalan.
+
+## 12. Default pindah ke `deepseek-v4.1-flash-free` — diukur, bukan diasumsikan (2026-11-05)
+
+Permintaan: jadikan mesin ini default deepseek 4.1 flash, dan pastikan perilakunya tidak
+kalah dari `cx/gpt-6.1-sol`. Urutan kerjanya: ukur dulu, baru ubah.
+
+### Empat slug "deepseek 4.1 flash" di gateway, dan bedanya
+
+| slug | `/chat/completions` | jalur Codex | catatan |
+| --- | --- | --- | --- |
+| `deepseek-v4.1-flash-free` | ✅ | ✅ | **dipakai** |
+| `oc/deepseek-v4.1-flash-free` | ✅ | ❌ `Reconnecting... 1/5` | menjawab di curl, **tidak pernah tersambung** di Codex |
+| `ctx/ollama/deepseek-v4.1-flash:cloud` | ✅ | ✅ | jalan, token lebih boros |
+| `ctx/conextlab/ollama/deepseek-v4.1-flash:cloud` | ✅ | ✅ | idem |
+
+Yang menentukan pilihan bukan `/v1/models` (keempatnya hidup) melainkan jalur Codex.
+`oc/...` adalah kegagalan paling berbahaya: lolos semua uji HTTP, lalu diam total di app.
+
+### Matriks perilaku, deepseek vs cx
+
+| probe | `deepseek-v4.1-flash-free` | `cx/gpt-6.1-sol` |
+| --- | --- | --- |
+| chat | PASS | PASS |
+| exec / shell | PASS | PASS |
+| MCP (`echo_text`) | PASS | PASS |
+| **sub-agent** | PASS (`collab: Wait` → benar) | PASS |
+| **gambar (`view_image`)** | PASS (`Red`) | PASS |
+| **edit kode 3 fungsi** | PASS (42 / 3.5 / None) | PASS (42 / 3.5 / None) |
+| tool calling mentah | `get_weather{"city":"Jakarta"}` | sama |
+| vision mentah `/chat/completions` | `Red.` | `Red` |
+| token sub-agent | **50.452 → 37.926** setelah instruksi | **17.726** |
+
+Dua koreksi atas catatan lama: sub-agent **bukan** lagi `unsupported call` untuk deepseek,
+dan gambar **bukan** hanya `cx/*`. Keduanya berubah sejak catatan 2026-10-31.
+
+### Selisih yang tetap ada: kebocoran reasoning
+
+Tanpa instruksi, deepseek menulis deliberasinya ke stdout:
+
+```
+We need must report exact answer. "Report its answer" could simply say SUBAGENT-OK? ...
+```
+
+Ini bukan kosmetik: 50k token untuk tugas yang cx selesaikan dengan 17,7k, dan output
+kotor. `model_instructions_file` menutupnya — 37,9k, jawaban bersih:
+
+```
+Sub-agent answer: SUBAGENT-OK
+```
+
+Karena itu default sekarang **selalu** membawa `9router.instructions.md`. Tanpa berkas itu,
+deepseek lebih boros daripada cx meski hasil akhirnya sama.
+
+### Yang diubah
+
+| berkas | perubahan |
+| --- | --- |
+| `9router.config.toml` (mesin ini) | `model = "deepseek-v4.1-flash-free"` + `model_instructions_file` |
+| `scripts/codex-launch.ps1` | default clone model |
+| `bin/codex-9router-catalog` | `DEFAULT_MODEL` default, supaya regenerate tidak mengembalikan cx ke prioritas 0 |
+| catalog | diregenerasi: 99 model, deepseek priority 0, `tool_mode=code_mode_only`, `lite=False` |
+
+`cx/gpt-6.1-sol` tetap ada di catalog dan tetap berfungsi — ia fallback bila jalur gambar
+upstream regresi. `-Model cx/gpt-6.1-sol` per launch tidak diubah perilakunya.
+
+### Batas yang dinyatakan
+
+- Satu mesin, satu gateway. Angka di atas bukan klaim universal.
+- Token diukur dari `tokens used` milik Codex, yang mencakup konteks, bukan hanya jawaban;
+  dua run dengan tugas sama bisa beda karena cache konteks (terlihat: 16.988 vs 3.804).
+- Instruksi menentukan **gaya keluaran**, bukan kualitas penalaran. Pada tugas yang lebih
+  sulit dari probe di atas, selisih cx vs deepseek belum diukur dan tidak diklaim.

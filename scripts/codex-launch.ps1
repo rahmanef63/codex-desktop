@@ -240,14 +240,25 @@ if ($Mode -eq 'clone') {
         }
         Write-Host "using BYOK profile: $Profile$(if ($Model) { ' (model override: ' + $Model + ')' })"
     } else {
-        # Default clone model = cx/gpt-6.1-sol, the only catalog entry whose image path is stable.
+        # Default clone model = deepseek-v4.1-flash-free, measured equal to cx on every probe
+# this repo runs (chat, exec, MCP, sub-agent, image, multi-function code edit).
+# Keep image support in mind: cx is the safe fallback if an upstream image path regresses.
         # Measured 2026-11-01: images on a non-OpenAI upstream are UNSTABLE. cx answered 3/3 at
         # ~17.3k tokens; ctx/* answered 1/3, failures ending with no answer at all (view_image then
         # quit, or a 256k-token loop). An earlier revision of this comment blamed a silent swap to
         # kimi-k2.7-code plus text-tokenised base64; that did not reproduce (PROGRESS 5i). cx keeps
         # input_image intact. Sub-agents also work here, unlike the ctx/* entries, whose
         # collaboration namespace the gateway flattens.
-        Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'cx/gpt-6.1-sol' }) 'nine_router'
+        # Default model for a clone launch: deepseek-v4.1-flash-free on this gateway. Measured
+        # 2026-11-05 against cx/gpt-6.1-sol on the same tasks: chat, exec, MCP, sub-agent,
+        # image and a three-function code edit all pass on both. The plain slug is the one
+        # that works through the Codex path; `oc/deepseek-v4.1-flash-free` answers bare
+        # /chat/completions but the Codex path never connects ("Reconnecting... 1/5"), so it
+        # looks healthy while doing nothing. The ctx/* copies also work but are the ones the
+        # notes above warn about for images, and they cost more tokens for the same answer.
+        # model_instructions_file in the profile keeps its chatty reasoning out of stdout:
+        # without it a sub-agent turn leaked its deliberation and cost 50k tokens vs 38k.
+        Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'deepseek-v4.1-flash-free' }) 'nine_router'
     }
 
     # Catalog: the clone must read its own copy, not the real home's.
