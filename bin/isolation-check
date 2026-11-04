@@ -13,13 +13,96 @@
 # file this script creates is $SNAPSHOT_FILE. It never stops a process, never launches Codex.
 set -uo pipefail
 
-# Overridable so this is not bound to one machine's account.
-USERPROFILE_WSL="${USERPROFILE_WSL:-/mnt/c/Users/rahma}"
-SNAPSHOT_FILE="${SNAPSHOT_FILE:-/tmp/isolation-check.snapshot.tsv}"
+# ------------------------------------------------------------------------------- platform
+#
+# Every platform-dependent command sits behind exactly one function below, so a new host is a
+# small addition and not a rewrite:
+#
+#   real_path   absolute path, symlinks and `..` resolved, path need not exist
+#   file_hash   byte identity of a config file
+#   proc_list   the account's live processes as "pid<TAB>name"
+#   link_scan   which links inside the clone home point out of it
+#
+# There is deliberately no file_size. A byte change that keeps the length is exactly what the
+# config invariant has to catch, so size alone would be a check that cannot fail.
 
-REAL="$USERPROFILE_WSL/.codex"
-CLONE="$USERPROFILE_WSL/.codex-clone"
-PROBE="$USERPROFILE_WSL/.codex-probe"
+PLATFORM="${ISOLATION_PLATFORM:-}"
+if [ -z "$PLATFORM" ]; then
+	case "$(uname -s 2>/dev/null)" in
+	Darwin) PLATFORM=darwin ;;
+	Linux)
+		PLATFORM=linux
+		grep -qi microsoft /proc/version 2>/dev/null && PLATFORM=wsl
+		;;
+	*) PLATFORM=unknown ;;
+	esac
+fi
+case "$PLATFORM" in
+wsl | linux | darwin) ;;
+*)
+	printf '  FAIL  unsupported platform: %s\n' "$PLATFORM" >&2
+	printf '        set ISOLATION_PLATFORM=wsl|linux|darwin to force one.\n' >&2
+	exit 2
+	;;
+esac
+
+# ------------------------------------------------------------------------------- homes
+#
+# Homes come from the environment first, then from the historical USERPROFILE_WSL, then from a
+# per-platform default. Nothing here is guessed beyond what the repository documents.
+#
+#   wsl     /mnt/c/Users/rahma — the Windows profile, reached over interop. Kept as the default so
+#           a snapshot taken before this port still verifies unchanged.
+#   darwin  real home: $HOME (Codex uses CODEX_HOME, else homedir()/.codex — docs/PROGRESS.md §1,
+#           and homedir() is $HOME on every Unix, so the documented fallback lands on $HOME/.codex).
+#           clone home: REQUIRED, no default. The only clone-home rule this repository states is
+#           the PowerShell launcher's `$USERPROFILE\.codex-clone` (scripts/codex-launch.ps1), and
+#           that launcher is Windows-only. Reusing the name on macOS would be a guess about a
+#           directory the app may never touch — and a check that verifies the wrong directory is
+#           worse than one that refuses.
+#   linux   real home: $HOME, same documented fallback. Clone home: required, same reason.
+#
+# A *defaulted* real home must look like a Codex home before it is trusted; see
+# check_default_home_shape. An explicit CODEX_REAL_HOME is never second-guessed.
+
+DEFAULTED_HOME=no
+if [ -n "${CODEX_REAL_HOME:-}" ]; then
+	REAL=$CODEX_REAL_HOME
+	HOME_ROOT=$(dirname -- "$REAL")
+elif [ -n "${USERPROFILE_WSL:-}" ]; then
+	HOME_ROOT=$USERPROFILE_WSL
+	REAL="$HOME_ROOT/.codex"
+else
+	DEFAULTED_HOME=yes
+	case "$PLATFORM" in
+	wsl) HOME_ROOT=${USERPROFILE_WSL:-/mnt/c/Users/rahma} ;;
+	*) HOME_ROOT=${HOME:-} ;;
+	esac
+	if [ -z "$HOME_ROOT" ]; then
+		printf '  FAIL  cannot determine the real home: HOME is unset.\n' >&2
+		printf '        set CODEX_REAL_HOME to the Codex home this machine uses.\n' >&2
+		exit 2
+	fi
+	REAL="$HOME_ROOT/.codex"
+fi
+
+# The clone home is only defaulted where the repository actually defines one: the WSL/Windows
+# layout, whose launcher puts it beside the real home. Elsewhere it must be named.
+if [ -n "${CODEX_CLONE_HOME:-}" ]; then
+	CLONE=$CODEX_CLONE_HOME
+elif [ "$PLATFORM" = wsl ]; then
+	CLONE="$HOME_ROOT/.codex-clone"
+else
+	printf '  FAIL  the clone home is not known on this platform (CODEX_CLONE_HOME unset).\n' >&2
+	printf '        Only the Windows launcher defines a default (.codex-clone beside the real home);\n' >&2
+	printf '        there is no documented clone home on %s, so this is not guessed.\n' "$PLATFORM" >&2
+	printf '        set CODEX_CLONE_HOME to the CODEX_HOME the clone actually runs with.\n' >&2
+	exit 2
+fi
+
+PROBE="${CODEX_PROBE_HOME:-$HOME_ROOT/.codex-probe}"
+
+SNAPSHOT_FILE="${SNAPSHOT_FILE:-/tmp/isolation-check.snapshot.tsv}"
 
 # The three process families the desktop app runs. `extension-host` is Chrome's plugin host,
 # which the app launches from inside its own cache directory.
@@ -40,8 +123,14 @@ Enforce CONTRACT §13 — "do not touch the real account when testing the clone"
   isolation-check verify            # after a probe: one PASS/FAIL line per invariant
   isolation-check                   # verify if a snapshot exists, else this message
 
-Env: USERPROFILE_WSL (default /mnt/c/Users/rahma), SNAPSHOT_FILE
-     (default /tmp/isolation-check.snapshot.tsv), PROC_RE.
+Env: CODEX_REAL_HOME, CODEX_CLONE_HOME, CODEX_PROBE_HOME — the three homes.
+     Defaults: real home is /mnt/c/Users/rahma/.codex on wsl, $HOME/.codex on darwin and
+     linux. The clone home defaults to .codex-clone beside the real home on wsl only; on
+     darwin and linux CODEX_CLONE_HOME is required, because only the Windows launcher
+     defines that path and a wrong guess would verify the wrong directory.
+     USERPROFILE_WSL still works as a legacy root for all three.
+     SNAPSHOT_FILE (default /tmp/isolation-check.snapshot.tsv), PROC_RE,
+     ISOLATION_PLATFORM=wsl|linux|darwin to override host detection.
 
 SNAPSHOT_FILE must resolve outside .codex, .codex-clone and .codex-probe — the
 snapshot is the only file this script writes, so it must not land in a home it protects.
@@ -52,17 +141,156 @@ EOF
 	exit 2
 }
 
-# The script's single write must not be aimable at the home it protects. `realpath -m` resolves
+# ------------------------------------------------------------------- external dependencies
+
+# real_path <path> — absolute, resolved, existence not required.
+#
+# Tried in order, first usable wins, because a tool can be present and still lack the flag:
+# GNU `realpath -m`, Python's os.path.realpath (lexical for missing components, which is what -m
+# gives; it still expands links that exist), GNU `readlink -f`. BSD has neither -m nor -f but does
+# have python3, so a macOS host lands on the second branch.
+real_path() {
+	local p="$1" out
+	if command -v realpath >/dev/null 2>&1; then
+		out=$(realpath -m -- "$p" 2>/dev/null)
+		if [ -n "$out" ]; then
+			printf '%s\n' "$out"
+			return 0
+		fi
+	fi
+	if command -v python3 >/dev/null 2>&1; then
+		out=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null)
+		if [ -n "$out" ]; then
+			printf '%s\n' "$out"
+			return 0
+		fi
+	fi
+	if command -v readlink >/dev/null 2>&1; then
+		out=$(readlink -f -- "$p" 2>/dev/null)
+		if [ -n "$out" ]; then
+			printf '%s\n' "$out"
+			return 0
+		fi
+	fi
+	return 1
+}
+
+file_hash() { # file_hash <file> — falls through to the next tool when one is present but unusable
+	[ -f "$1" ] || return 1
+	local h=""
+	if command -v md5sum >/dev/null 2>&1; then
+		h=$(md5sum -- "$1" 2>/dev/null | cut -d' ' -f1)
+	fi
+	if [ -z "$h" ] && command -v md5 >/dev/null 2>&1; then
+		h=$(md5 -q -- "$1" 2>/dev/null) # BSD/macOS
+	fi
+	if [ -z "$h" ] && command -v shasum >/dev/null 2>&1; then
+		h=$(shasum -a 256 -- "$1" 2>/dev/null | cut -d' ' -f1)
+	fi
+	[ -n "$h" ] || return 1
+	printf '%s\n' "$h"
+}
+
+# One PID and process name per line, tab-separated, sorted by PID. Non-zero when the process
+# list cannot be read at all — which is different from "no ChatGPT running", and must not be
+# treated as success.
+#
+# The name is recorded because PID membership alone cannot tell a restarted chat renderer from a
+# dead application. Chromium spawns and reaps renderers constantly; the app process is what must
+# survive. Comparing PID sets made every renderer recycle look like a killed account.
+proc_list() {
+	case "$PLATFORM" in
+	wsl) proc_list_windows ;;
+	*) proc_list_posix ;;
+	esac
+}
+
+proc_list_windows() {
+	local out
+	out=$(powershell.exe -NoProfile -Command \
+		"Get-Process | Where-Object {\$_.ProcessName -match '$PROC_RE'} | ForEach-Object { \"\$(\$_.Id)\`t\$(\$_.ProcessName)\" }" \
+		2>/dev/null) || return 1
+	printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+\s' | sort -n -u -k1,1
+	return 0
+}
+
+proc_list_posix() {
+	local out
+	out=$(ps -Ao pid=,comm= 2>/dev/null) || return 1
+	[ -n "$out" ] || return 1
+	# comm is a full executable path on macOS and a bare (15-char) name on Linux; take the last
+	# path element so both give the name the Windows path records. `-match` was already
+	# case-insensitive, so grep is too. Zero matches is an empty list, not an unreadable one —
+	# only a failing `ps` is.
+	printf '%s\n' "$out" |
+		awk '{ pid = $1; $1 = ""; sub(/^[ \t]+/, ""); n = split($0, a, "/"); if (a[n] != "") print pid "\t" a[n] }' |
+		{ grep -E -i -- "$PROC_RE" || true; } | sort -n -u -k1,1
+	return 0
+}
+
+# Prints one line per link under <root>: "<inside|escape|unreadable><TAB><link><TAB><target>".
+# CONTRACT §1 allows links that stay inside (the app makes exactly one, the chrome plugin cache
+# pointing at its own versioned directory) and forbids the ones that leave. `unreadable` counts
+# as a failure at the call site: a link whose target cannot be resolved is not provably inside.
+# Non-zero only when the tree cannot be scanned at all.
+link_scan() {
+	local root="$1" root_real listing link target joined resolved
+	[ -d "$root" ] || return 1
+	root_real=$(real_path "$root") || return 1
+	[ -n "$root_real" ] || return 1
+	listing=$(find "$root" -type l 2>/dev/null) || return 1
+	[ -n "$listing" ] || return 0
+	while IFS= read -r link; do
+		[ -n "$link" ] || continue
+		if ! target=$(readlink -- "$link" 2>/dev/null); then
+			printf 'unreadable\t%s\t?\n' "$link"
+			continue
+		fi
+		case "$target" in
+		/* | [A-Za-z]:[\\/]*) joined=$target ;;
+		*) joined="$(dirname -- "$link")/$target" ;;
+		esac
+		if ! resolved=$(real_path "$joined"); then
+			printf 'unreadable\t%s\t%s\n' "$link" "$target"
+			continue
+		fi
+		case "$resolved/" in
+		"$root_real"/*) printf 'inside\t%s\t%s\n' "$link" "$resolved" ;;
+		*) printf 'escape\t%s\t%s\n' "$link" "$resolved" ;;
+		esac
+	done <<<"$listing"
+	return 0
+}
+
+# ---------------------------------------------------------------- defaulted home sanity
+#
+# A real home that was defaulted rather than named must look like a Codex home, or this tool
+# would happily verify isolation of a directory nobody is using — the exact failure it exists to
+# prevent. The app always leaves at least one of config.toml, auth.json or sessions/ behind.
+# Nothing is printed when the shape is fine, so a healthy WSL run is unchanged.
+check_default_home_shape() {
+	[ "$DEFAULTED_HOME" = yes ] || return 0
+	[ -d "$REAL" ] || return 0 # reported by the caller as "home missing"
+	if [ -f "$REAL/config.toml" ] || [ -f "$REAL/auth.json" ] || [ -d "$REAL/sessions" ]; then
+		return 0
+	fi
+	bad "real home defaulted to $REAL but has no config.toml, auth.json or sessions/"
+	printf '        that is not a Codex home on this machine — set CODEX_REAL_HOME (and\n'
+	printf '        CODEX_CLONE_HOME / CODEX_PROBE_HOME) to the paths the app actually uses.\n'
+	return 1
+}
+
+# The script's single write must not be aimable at the home it protects. real_path resolves
 # symlinks and `..` without requiring the path to exist, so a traversal or a symlinked directory
 # is caught before anything is created. Returns 1 and prints the offending path when refused.
 guard_snapshot_path() {
-	local target root resolved r
-	target=$(realpath -m -- "$SNAPSHOT_FILE" 2>/dev/null) || {
+	local target root resolved
+	target=$(real_path "$SNAPSHOT_FILE") || {
 		printf '  FAIL  SNAPSHOT_FILE is not a usable path: %s\n' "$SNAPSHOT_FILE" >&2
 		return 1
 	}
 	for root in "$REAL" "$CLONE" "$PROBE"; do
-		resolved=$(realpath -m -- "$root" 2>/dev/null) || continue
+		resolved=$(real_path "$root") || continue
 		[ -n "$resolved" ] || continue
 		# Compare with a trailing slash so `.codex-backup` is not treated as inside `.codex`.
 		case "$target/" in
@@ -88,33 +316,6 @@ count_sessions() {
 	find "$1/sessions" -type f 2>/dev/null | wc -l | tr -d ' '
 }
 
-md5_of() {
-	[ -f "$1" ] || return 1
-	local h
-	h=$(md5sum "$1" 2>/dev/null | cut -d' ' -f1) || return 1
-	[ -n "$h" ] || return 1
-	printf '%s\n' "$h"
-}
-
-# Prints one PID and process name per line, tab-separated, sorted by PID. Returns non-zero when the
-# process list cannot be read at all — which is different from "no ChatGPT running", and must not
-# be treated as success.
-#
-# The name is recorded because PID membership alone cannot tell a restarted chat renderer from a
-# dead application. Chromium spawns and reaps renderers constantly; the app process is what must
-# survive. Comparing PID sets made every renderer recycle look like a killed account.
-list_pids() {
-	local out
-	out=$(powershell.exe -NoProfile -Command \
-		"Get-Process | Where-Object {\$_.ProcessName -match '$PROC_RE'} | ForEach-Object { \"\$(\$_.Id)\`t\$(\$_.ProcessName)\" }" \
-		2>/dev/null) || return 1
-	printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+\s' | sort -n -u -k1,1
-	return 0
-}
-
-# Just the numbers, for counting and for the "cannot read" check.
-list_pid_numbers() { list_pids | cut -f1; }
-
 snap_field() { # snap_field <key> <second-field>
 	awk -F'\t' -v k="$1" -v f="$2" '$1 == k && $2 == f { print $3; exit }' "$SNAPSHOT_FILE"
 }
@@ -124,42 +325,53 @@ snap_pids() { awk -F'\t' '$1 == "pid" { print $2 }' "$SNAPSHOT_FILE" | sort -n -
 # ---------------------------------------------------------------------------- snapshot
 
 cmd_snapshot() {
+	check_default_home_shape
 	guard_snapshot_path || { FAIL=$((FAIL + 1)); summary; }
 
 	printf '\n=== isolation check: snapshot ===\n'
-	printf 'home: %s\n' "$USERPROFILE_WSL"
+	printf 'home: %s\n' "$HOME_ROOT"
 	printf 'file: %s\n\n' "$SNAPSHOT_FILE"
+	printf 'platform: %s\n\n' "$PLATFORM"
 
 	if [ ! -d "$REAL" ]; then
 		bad "real home missing: $REAL — a snapshot of nothing proves nothing"
 		summary
 	fi
 
-	local n_real n_clone n_probe md5_cfg md5_auth pids
+	local n_real n_clone n_probe md5_cfg md5_auth pids links escapes scan
 	if ! n_real=$(count_sessions "$REAL"); then
 		bad "cannot count $REAL/sessions"
 		summary
 	fi
 	n_clone=$(count_sessions "$CLONE") || n_clone="missing"
 	n_probe=$(count_sessions "$PROBE") || n_probe="missing"
-	md5_cfg=$(md5_of "$REAL/config.toml") || md5_cfg="missing"
-	md5_auth=$(md5_of "$REAL/auth.json") || md5_auth="missing"
-	pids=$(list_pids) || {
-		bad "cannot read the Windows process list — pre-existing PIDs would be unverifiable"
+	md5_cfg=$(file_hash "$REAL/config.toml") || md5_cfg="missing"
+	md5_auth=$(file_hash "$REAL/auth.json") || md5_auth="missing"
+	pids=$(proc_list) || {
+		bad "cannot read the process list for platform '$PLATFORM' — pre-existing processes would be unverifiable"
 		summary
 	}
+	# Counted for the human summary only. Verify re-scans rather than comparing to these: a link
+	# that leaves the clone home is a violation regardless of when it appeared, so the check needs
+	# no baseline and a snapshot taken before this port still verifies.
+	scan=$(link_scan "$CLONE") || scan=""
+	links=$(printf '%s\n' "$scan" | grep -c .)
+	escapes=$(printf '%s\n' "$scan" | awk -F'\t' '$1 != "inside"' | grep -c .)
 
 	{
 		printf '# isolation-check snapshot — see bin/isolation-check\n'
 		printf '# generated\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-		printf 'home\t%s\n' "$USERPROFILE_WSL"
+		printf 'home\t%s\n' "$HOME_ROOT"
 		printf 'sessions\t.codex\t%s\n' "$n_real"
 		printf 'sessions\t.codex-clone\t%s\n' "$n_clone"
 		printf 'sessions\t.codex-probe\t%s\n' "$n_probe"
 		printf 'md5\t.codex/config.toml\t%s\n' "$md5_cfg"
 		printf 'md5\t.codex/auth.json\t%s\n' "$md5_auth"
 		# `pid<TAB>number<TAB>name` — the name lets verify tell a recycled renderer from a dead app.
-		printf '%s\n' "$pids" | grep -E '^[0-9]+\s' | awk -F'\t' '{ printf "pid\t%s\t%s\n", $1, $2 }'
+		# A machine running no matching process yields no pid lines, and that must still be a
+		# readable snapshot: an empty set is a real answer, not a failed write.
+		{ printf '%s\n' "$pids" | grep -E '^[0-9]+\s' || true; } |
+			awk -F'\t' '{ printf "pid\t%s\t%s\n", $1, $2 }'
 	} >"$SNAPSHOT_FILE" || {
 		bad "cannot write $SNAPSHOT_FILE"
 		summary
@@ -168,7 +380,11 @@ cmd_snapshot() {
 	info "real home sessions: $n_real"
 	info "clone home sessions: $n_clone"
 	info "probe home sessions: $n_probe (allowed to grow)"
+	info "clone home links: $links ($escapes escaping)"
 	info "pre-existing PIDs recorded: $(printf '%s\n' "$pids" | grep -cE '^[0-9]+\s')"
+	if [ "$PLATFORM" = darwin ] && [ "$n_clone" = missing ]; then
+		info "no clone home at $CLONE — if the app keeps it elsewhere, set CODEX_CLONE_HOME"
+	fi
 	ok "snapshot written to $SNAPSHOT_FILE"
 	summary
 }
@@ -200,7 +416,7 @@ check_md5() { # check_md5 <label> <relative-path> <absolute-path>
 		bad "$label — snapshot has no md5 for $rel"
 		return
 	fi
-	if ! now=$(md5_of "$file"); then
+	if ! now=$(file_hash "$file"); then
 		bad "$label — cannot read $file"
 		return
 	fi
@@ -211,12 +427,35 @@ check_md5() { # check_md5 <label> <relative-path> <absolute-path>
 	fi
 }
 
+# CONTRACT §1. Stateless: a link that leaves the clone home is a violation whether or not it was
+# there when the snapshot was taken, so this needs no baseline and an older snapshot still
+# verifies. Links that stay inside are the app's own plugin cache and are counted, not failed.
+check_links() {
+	local scan total escaping
+	if ! scan=$(link_scan "$CLONE"); then
+		bad "clone home links — cannot scan $CLONE, so isolation is unproven"
+		return
+	fi
+	total=$(printf '%s\n' "$scan" | grep -c .)
+	escaping=$(printf '%s\n' "$scan" | awk -F'\t' '$1 != "inside"' | grep -c .)
+	if [ "$total" -eq 0 ]; then
+		ok "clone home has no links at all"
+	elif [ "$escaping" -eq 0 ]; then
+		ok "clone home: $total links, all inside"
+	else
+		bad "clone home has $escaping link(s) pointing out of it:"
+		printf '%s\n' "$scan" | awk -F'\t' '$1 != "inside" { printf "        %s -> %s\n", $2, $3 }'
+	fi
+}
+
 cmd_verify() {
+	check_default_home_shape
 	guard_snapshot_path || { FAIL=$((FAIL + 1)); summary; }
 
 	printf '\n=== isolation check: verify ===\n'
-	printf 'home: %s\n' "$USERPROFILE_WSL"
+	printf 'home: %s\n' "$HOME_ROOT"
 	printf 'file: %s\n\n' "$SNAPSHOT_FILE"
+	printf 'platform: %s\n\n' "$PLATFORM"
 
 	if [ ! -f "$SNAPSHOT_FILE" ]; then
 		bad "no snapshot at $SNAPSHOT_FILE — nothing to compare against"
@@ -230,8 +469,8 @@ cmd_verify() {
 
 	local recorded_home
 	recorded_home=$(awk -F'\t' '$1 == "home" { print $2; exit }' "$SNAPSHOT_FILE")
-	if [ "$recorded_home" != "$USERPROFILE_WSL" ]; then
-		bad "snapshot was taken against '${recorded_home:-<none>}', not '$USERPROFILE_WSL' — not comparable"
+	if [ "$recorded_home" != "$HOME_ROOT" ]; then
+		bad "snapshot was taken against '${recorded_home:-<none>}', not '$HOME_ROOT' — not comparable"
 		summary
 	fi
 
@@ -247,7 +486,7 @@ cmd_verify() {
 	want=$(printf '%s\n' "$was_pids" | grep -cE '^[0-9]+$')
 	if [ "$want" -eq 0 ]; then
 		info "pre-existing PIDs: none recorded in the snapshot"
-	elif ! cur=$(list_pids); then
+	elif ! cur=$(proc_list); then
 		bad "pre-existing PIDs ($want recorded) — cannot read the process list, so unverifiable"
 	else
 		# A recorded process counts as alive when its name is still running, even under a new PID.
@@ -277,7 +516,10 @@ cmd_verify() {
 		fi
 	fi
 
-	# Invariant 6: the probe home is where probes are supposed to write. Growth is the point.
+	# Invariant 6 (CONTRACT §1): no link leaves the clone home.
+	check_links
+
+	# Invariant 7: the probe home is where probes are supposed to write. Growth is the point.
 	local probe_was probe_now delta
 	probe_was=$(snap_field sessions .codex-probe)
 	if ! probe_now=$(count_sessions "$PROBE"); then
