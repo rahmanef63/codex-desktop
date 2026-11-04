@@ -16,6 +16,13 @@ real problem that took time to find.
 3. **Never write into `~/.codex` from clone mode.** Not the config, not `auth.json`, not sessions.
 4. **`auth.json` belongs to the real account.** It must never be copied into the clone home. The
    clone authenticates to its own gateway and needs no ChatGPT credentials.
+5. **One resolver names the home.** `bin/codex_home.py` decides it; the bin scripts import it and
+   `app/src/main.mjs` runs `bin/codex-home --json`. A second copy of these rules is the defect, not
+   the fix — it is why the window showed "no profile" while a working profile existed, and why a
+   test run wrote into the real Windows clone home. The rules, the per-platform answers and the
+   refusal codes are specified in `docs/CODEX-HOME.md`; `app/tests/home-agreement.mjs` fails the
+   build when two callers disagree. A default must never hardcode a username, and a derived path
+   that is relative or whose base does not exist is refused, never returned.
 
 ## Configuration
 

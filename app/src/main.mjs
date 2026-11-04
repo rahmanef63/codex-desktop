@@ -14,7 +14,6 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { execFile, execFileSync } from "node:child_process";
 import path from "node:path";
-import os from "node:os";
 import fs from "node:fs";
 
 // The scripts live in the repository; the packaged app carries a copy under resources/.
@@ -25,42 +24,58 @@ const BIN_DIR = fs.existsSync(path.join(REPO_BIN, "codex-byok")) ? REPO_BIN : RE
 /**
  * Which Codex home to read.
  *
- * CODEX_HOME wins, then the Windows clone home — but only when actually running under WSL,
- * because that is the one situation where the app (and therefore its home) lives on the
- * Windows side while the process is Linux. Anywhere else it is ~/.codex-clone.
+ * This used to be a second implementation of the rules — `CODEX_HOME`, then the Windows
+ * clone home under WSL, else `~/.codex-clone` — and it disagreed with `bin/codex-version-drift`
+ * and with the PowerShell launcher. The window showed "no profile" while a working profile
+ * existed one directory over.
  *
- * The Windows path is DERIVED, never hardcoded: `os.homedir()` under WSL is the LINUX home
- * (/home/<user>), so it is not a substitute, and hardcoding a username is wrong on every
- * machine but one. Ask Windows for USERPROFILE and translate it.
+ * The rules now live in exactly one file, `bin/codex_home.py`. Node cannot import Python,
+ * so this asks that file once and takes its answer verbatim. Nothing about the decision is
+ * re-derived here: a divergent second copy is what broke, so there is no second copy.
+ *
+ * A refusal is surfaced, not papered over: `CODEX_HOME=../evil` cannot silently resolve
+ * against the current directory, because the resolver refuses it and this passes the
+ * reason through to the window.
  */
-function resolveCodexHome() {
-  if (process.env.CODEX_HOME) return process.env.CODEX_HOME;
-  const isWsl = Boolean(process.env.WSL_DISTRO_NAME);
-  if (isWsl) {
-    const winHome = windowsHomeFromWsl();
-    if (winHome) return path.join(winHome, ".codex-clone");
-  }
-  return path.join(os.homedir(), ".codex-clone");
-}
+const HOME_RESOLUTION = resolveHomeOnce();
 
-function windowsHomeFromWsl() {
-  const runOnce = (cmd, args) => {
-    try {
-      const out = execFileSync(cmd, args, { encoding: "utf8", timeout: 15000 }).trim();
-      return out || null;
-    } catch {
-      return null;
+function resolveHomeOnce() {
+  const script = path.join(BIN_DIR, "codex-home");
+  let stdout;
+  try {
+    stdout = execFileSync(script, ["--json"], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { ...process.env },
+    });
+  } catch (err) {
+    // A non-zero exit still prints the JSON refusal on stdout — that is the point of
+    // `--json` returning 2 rather than throwing.
+    stdout = String(err?.stdout || "");
+    if (!stdout.trim()) {
+      return {
+        ok: false,
+        reason: "resolver-failed",
+        message: `bin/codex-home could not be run: ${err?.message || err}`,
+        clone: null,
+        real: null,
+      };
     }
-  };
-  // USERPROFILE is frequently unset inside WSL; asking Windows is authoritative.
-  const profile = process.env.USERPROFILE
-    || runOnce("cmd.exe", ["/c", "echo %USERPROFILE%"]);
-  if (!profile || profile.toUpperCase() === "%USERPROFILE%") return null;
-  const translated = runOnce("wslpath", ["-u", profile]);
-  return translated && path.isAbsolute(translated) ? translated : null;
+  }
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    return {
+      ok: false,
+      reason: "resolver-not-json",
+      message: "bin/codex-home --json did not return JSON",
+      clone: null,
+      real: null,
+    };
+  }
 }
 
-const CODEX_HOME = resolveCodexHome();
+const CODEX_HOME = HOME_RESOLUTION.ok ? HOME_RESOLUTION.clone : null;
 
 /**
  * Where a BYOK profile may live.
@@ -69,22 +84,12 @@ const CODEX_HOME = resolveCodexHome();
  * `~/.codex/9router.config.toml` — the ChatGPT-side home — while the clone home is the one a
  * clone launch reads. Searching only the clone home reported "no profile" while a working
  * one sat one directory over, so both are searched, clone first because that is the home a
- * clone launch actually uses.
+ * clone launch actually uses. Both paths come from the same resolver answer, so they cannot
+ * disagree about which Windows user they belong to.
  */
 function profileHomes() {
-  const homes = [CODEX_HOME];
-  // The ChatGPT-side home is the Windows one under WSL, not the Linux ~/.codex — that is
-  // where the app and its profiles actually live. Ask the same resolver that found the
-  // clone home, so both answers come from one place.
-  const real = process.env.CODEX_REAL_HOME || realHomeFromWsl() || path.join(os.homedir(), ".codex");
-  if (real !== CODEX_HOME) homes.push(real);
-  return homes;
-}
-
-function realHomeFromWsl() {
-  if (!process.env.WSL_DISTRO_NAME) return null;
-  const base = windowsHomeFromWsl(); // returns the translated /mnt/c/Users/<winuser>
-  return base ? path.join(base, ".codex") : null;
+  const homes = [CODEX_HOME, process.env.CODEX_REAL_HOME || HOME_RESOLUTION.real];
+  return [...new Set(homes.filter(Boolean))];
 }
 
 /** Run one of our python scripts. argv is a fixed array; nothing is interpolated into a shell. */
@@ -110,6 +115,9 @@ function run(script, args, { timeout = 120_000 } = {}) {
 let allowedModels = new Set();
 
 async function listProfiles() {
+  // No home means no honest answer. Say why, in the resolver's own words, rather than
+  // falling back to a guess — the guess is what used to write into the wrong home.
+  if (!HOME_RESOLUTION.ok) return { ok: false, error: HOME_RESOLUTION.message };
   const rows = [];
   const seen = new Set();
   const errors = [];
@@ -142,6 +150,7 @@ async function listProfiles() {
 }
 
 async function checkDrift() {
+  if (!HOME_RESOLUTION.ok) return { ok: false, error: HOME_RESOLUTION.message };
   const r = await run("codex-version-drift", ["check", "--json", "--home", CODEX_HOME]);
   // Exit 1 means "drift", which is a successful measurement — only 2 is a failure.
   if (r.code === 2) return { ok: false, error: r.stderr || "nothing recorded yet" };
@@ -203,6 +212,7 @@ ipcMain.handle("apply", async (_event, target) => {
 });
 
 ipcMain.handle("record-drift", async () => {
+  if (!HOME_RESOLUTION.ok) return { ok: false, error: HOME_RESOLUTION.message };
   const r = await run("codex-version-drift", ["record", "--home", CODEX_HOME]);
   return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
 });

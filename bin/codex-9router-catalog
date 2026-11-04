@@ -13,9 +13,28 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import urllib.request
 
-DEFAULT_HOME = os.environ.get("CODEX_HOME") or "/mnt/c/Users/rahma/.codex"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import codex_home as home_resolver  # noqa: E402
+
+# This used to be `os.environ["CODEX_HOME"] or "/mnt/c/Users/rahma/.codex"` — a hardcoded
+# username, wrong on every machine but one, and it disagreed with the two scripts beside it.
+# The default is the DERIVED real (ChatGPT-side) home now: this tool writes a catalog that
+# the real home reads, so the real home is the one it means.
+def default_home():
+    result = home_resolver.resolve()
+    if not result["ok"]:
+        exc = SystemExit(result["message"])
+        exc.reason = result["reason"]
+        raise exc
+    if not result["real"]:
+        exc = SystemExit("cannot name the ChatGPT-side home here; pass --codex-home")
+        exc.reason = "no-real-home"
+        raise exc
+    return result["real"]
+
 BASE = os.environ.get("NINE_ROUTER_URL", "https://router.antinrml.com/v1")
 
 LEVELS = [
@@ -72,10 +91,12 @@ def build_entry(template, slug, cap, priority):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--codex-home", default=DEFAULT_HOME)
+    ap.add_argument("--codex-home", default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument("--template", default=None)
     args = ap.parse_args()
+    if args.codex_home is None:
+        args.codex_home = default_home()
 
     key = os.environ.get("NINE_ROUTER_KEY")
     if not key:

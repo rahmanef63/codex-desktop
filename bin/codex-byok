@@ -33,14 +33,44 @@ import sys
 import urllib.error
 import urllib.request
 
-DEFAULT_HOME = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex-clone")
+DEFAULT_HOME = None  # deprecated: resolved per call by home_dir(), through the shared resolver
 RESERVED = {"config"}  # config.toml itself is not a profile
+
+_resolver_mod = None
+
+
+def _resolver():
+    """Import the shared resolver on first use.
+
+    Deferred on purpose: this file is `exec`'d by `app/tests/test-apply.py` to reach
+    `set_top_level` alone, and that harness supplies no `__file__`. A module-scope import
+    of the sibling made the whole file unimportable there, breaking a test that has
+    nothing to do with homes.
+    """
+    global _resolver_mod
+    if _resolver_mod is not None:
+        return _resolver_mod
+    here = os.path.dirname(os.path.abspath(globals().get("__file__") or sys.argv[0]))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import codex_home as mod
+
+    _resolver_mod = mod
+    return mod
 
 
 # ----------------------------------------------------------------- profile files
 
 def home_dir(explicit=None):
-    return explicit or DEFAULT_HOME
+    """The home to read or write.
+
+    `DEFAULT_HOME` was a module-level `~/.codex-clone`, which is the WRONG home on WSL:
+    there the app and its profiles live on the Windows side, so the clone home is
+    `/mnt/c/Users/<winuser>/.codex-clone` while `~/.codex-clone` may not exist at all.
+    Resolved per call through the shared resolver now, so all three callers answer alike
+    and a refusal is raised instead of becoming a relative path.
+    """
+    return explicit or _resolver().clone_home()
 
 
 def profile_path(home, name):
