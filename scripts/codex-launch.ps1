@@ -4,7 +4,14 @@ param(
     # Where the real ChatGPT home lives. Default: %USERPROFILE%\.codex
     [string]$RealHome = '',
     # Where the isolated clone home lives. Default: %USERPROFILE%\.codex-clone
-    [string]$CloneHome = ''
+    [string]$CloneHome = '',
+    # Which BYOK profile to run under, by name: $CODEX_HOME\<name>.config.toml.
+    # Empty means the built-in `nine_router` provider below, i.e. the original behaviour.
+    # Manage these with bin/codex-byok (list / add / pick / apply).
+    [string]$Profile = '',
+    # Override the model for this launch only. Empty means the profile's own value, or the
+    # measured default when no profile is named.
+    [string]$Model = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -207,14 +214,41 @@ if ($Mode -eq 'clone') {
 
     # Same story for the model: a UI pick rewrites `model` to a slug nine_router cannot
     # serve. Pin the pair the profile was measured with.
-    # Default clone model = cx/gpt-6.1-sol, the only catalog entry whose image path is stable.
-    # Measured 2026-11-01: images on a non-OpenAI upstream are UNSTABLE. cx answered 3/3 at
-    # ~17.3k tokens; ctx/* answered 1/3, failures ending with no answer at all (view_image then
-    # quit, or a 256k-token loop). An earlier revision of this comment blamed a silent swap to
-    # kimi-k2.7-code plus text-tokenised base64; that did not reproduce (PROGRESS 5i). cx keeps
-    # input_image intact. Sub-agents also work here, unlike the ctx/* entries, whose
-    # collaboration namespace the gateway flattens.
-    Set-CloneModel $targetConfig 'cx/gpt-6.1-sol' 'nine_router'
+    #
+    # With -Profile, the profile is the source of truth: it names its own provider table and
+    # model, so we do not overwrite those. Only the sandbox and plugin keys are still
+    # re-asserted, because those are the two the app rewrites on every launch regardless.
+    if ($Profile) {
+        $profilePath = Join-Path $cloneHome ($Profile + '.config.toml')
+        if (-not (Test-Path -LiteralPath $profilePath)) {
+            throw "no such BYOK profile: $profilePath. Create one with: bin/codex-byok profile add $Profile ..."
+        }
+        if ($Profile -notmatch '^[A-Za-z0-9._-]+$') {
+            throw "profile name may only contain letters, digits, dot, underscore and dash"
+        }
+        # The profile is layered by the app, not copied: keep it where it is and let Codex
+        # merge it. A model override still has to go into the BASE config, because that is
+        # the file the app reads first.
+        if ($Model) {
+            $provider = ''
+            $m = Select-String -LiteralPath $profilePath -Pattern '^\s*model_provider\s*=\s*"([^"]+)"'
+            if ($m) { $provider = $m.Matches[0].Groups[1].Value }
+            if (-not $provider) {
+                throw "profile $Profile has no model_provider; it cannot be layered"
+            }
+            Set-CloneModel $targetConfig $Model $provider
+        }
+        Write-Host "using BYOK profile: $Profile$(if ($Model) { ' (model override: ' + $Model + ')' })"
+    } else {
+        # Default clone model = cx/gpt-6.1-sol, the only catalog entry whose image path is stable.
+        # Measured 2026-11-01: images on a non-OpenAI upstream are UNSTABLE. cx answered 3/3 at
+        # ~17.3k tokens; ctx/* answered 1/3, failures ending with no answer at all (view_image then
+        # quit, or a 256k-token loop). An earlier revision of this comment blamed a silent swap to
+        # kimi-k2.7-code plus text-tokenised base64; that did not reproduce (PROGRESS 5i). cx keeps
+        # input_image intact. Sub-agents also work here, unlike the ctx/* entries, whose
+        # collaboration namespace the gateway flattens.
+        Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'cx/gpt-6.1-sol' }) 'nine_router'
+    }
 
     # Catalog: the clone must read its own copy, not the real home's.
     $targetCatalog = Join-Path $cloneHome 'nine-router-models.json'

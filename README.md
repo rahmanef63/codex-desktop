@@ -30,6 +30,10 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `bin/isolation-check` | `snapshot` before a probe, `verify` after: proves the real account's sessions, config, auth and processes were untouched. Enforces CONTRACT §13. |
 | `scripts/capture_proxy.py` | Records the exact request the app sends to a gateway. |
 | `scripts/mcp_echo.py` | Harmless MCP server used to prove MCP survives the gateway path. |
+| `bin/codex-version-drift` | Records a fingerprint of everything our tooling depends on and reports when an app update moves it. Answers "did the app change under us". |
+| `bin/codex-byok` | BYOK profiles: list, add, pick a model, apply. Probes each profile's gateway and reports what it can really serve. |
+| `app/` | One Electron window over those two. Unsigned on purpose. Not a Codex clone. |
+| `docs/BYOK-AND-UPDATES.md` | Why nothing here is signed, how profiles work, and how to stay current through a Store update. |
 | `docs/PROGRESS.md` | Working notes: what is proven, what is not, and every trap that cost time. |
 | `parity-evidence/capability-matrix.txt` | The measured capability matrix and the root cause behind each verdict. |
 

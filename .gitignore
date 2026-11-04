@@ -23,6 +23,10 @@ progress.local.md
 PROGRESS.local.md
 *.progress.local.*
 
+# Dependencies and Electron build output — reproducible, never committed
+node_modules/
+app/dist/
+
 # Machine-local artifacts
 *.log
 *.sqlite

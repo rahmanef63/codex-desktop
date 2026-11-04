@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+<title>Codex BYOK</title>
+<style>
+  :root {
+    --bg: #111214;
+    --panel: #17191c;
+    --line: #26292e;
+    --ink: #e8eaed;
+    --dim: #9aa3ad;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --accent: #7dd3fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 18px 22px 14px; border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .01em; }
+  header .home { color: var(--dim); font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
+  header button { margin-left: auto; }
+  main { padding: 18px 22px 28px; display: grid; gap: 22px; }
+  section > h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--dim); font-weight: 600; margin: 0 0 10px;
+  }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; border-top: 1px solid var(--line);
+  }
+  .row:first-child { border-top: 0; }
+  .row .name { font-family: ui-monospace, Menlo, monospace; font-size: 12px; min-width: 130px; }
+  .row .meta { color: var(--dim); font-size: 11.5px; }
+  .row .count { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+  button {
+    font: inherit; font-size: 12px; color: var(--ink); background: #20242a;
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 11px; cursor: pointer;
+  }
+  button:hover { background: #262b32; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { border-color: #2b5a73; background: #12303d; color: var(--accent); }
+  button.primary:hover { background: #16404f; }
+  .pill {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+    padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor;
+  }
+  .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); }
+  ul.problems { margin: 0; padding: 0; list-style: none; }
+  ul.problems li {
+    display: flex; gap: 10px; padding: 9px 14px; border-top: 1px solid var(--line);
+    font-size: 12px;
+  }
+  ul.problems li:first-child { border-top: 0; }
+  ul.problems .id { font-family: ui-monospace, Menlo, monospace; color: var(--warn); min-width: 190px; }
+  ul.problems .detail { color: var(--dim); }
+  #empty { padding: 14px; color: var(--dim); font-size: 12px; }
+  #status { color: var(--dim); font-size: 11.5px; padding: 0 22px 16px; min-height: 18px; }
+  #models { max-height: 320px; overflow: auto; }
+  .model {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 14px; border-top: 1px solid var(--line); font-size: 12px;
+  }
+  .model:first-child { border-top: 0; }
+  .model .id { font-family: ui-monospace, Menlo, monospace; }
+  .model button { margin-left: auto; padding: 3px 9px; font-size: 11px; }
+  .model.active .id { color: var(--accent); }
+  .filter {
+    width: 100%; font: inherit; font-size: 12px; color: var(--ink);
+    background: #131519; border: 1px solid var(--line); border-radius: 6px;
+    padding: 7px 11px; margin-bottom: 10px;
+  }
+  .filter:focus { outline: 1px solid #2b5a73; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Codex BYOK</h1>
+  <span class="home" id="home"></span>
+  <button id="refresh">Refresh</button>
+</header>
+
+<main>
+  <section>
+    <h2>Profiles</h2>
+    <div class="card" id="profiles"></div>
+  </section>
+
+  <section>
+    <h2>Models this machine can use</h2>
+    <input class="filter" id="filter" type="search" placeholder="filter by name — e.g. kimi, glm, sol" />
+    <div class="card" id="models"></div>
+  </section>
+
+  <section>
+    <h2>App drift</h2>
+    <div class="card" id="drift"></div>
+  </section>
+</main>
+
+<div id="status"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const status = (msg, bad) => {
+    const el = $("status");
+    el.textContent = msg || "";
+    el.style.color = bad ? "var(--bad)" : "var(--dim)";
+  };
+
+  let allModels = [];
+  let activeModel = "";
+
+  function profileRow(row) {
+    const div = document.createElement("div");
+    div.className = "row";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = row.name;
+    div.append(name);
+
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = row.base_url || "no base_url";
+    div.append(meta);
+
+    const pill = document.createElement("span");
+    const keyed = row.key_present;
+    pill.className = "pill " + (keyed ? "ok" : "bad");
+    pill.textContent = keyed ? "key" : "no key";
+    div.append(pill);
+
+    const count = document.createElement("span");
+    count.className = "count";
+    count.textContent = row.probe_error
+      ? row.probe_error
+      : (row.models || []).length + " models";
+    if (row.probe_error) count.style.color = "var(--warn)";
+    div.append(count);
+    return div;
+  }
+
+  function renderProfiles(rows) {
+    const box = $("profiles");
+    box.replaceChildren();
+    if (!rows.length) {
+      const p = document.createElement("div");
+      p.id = "empty";
+      p.textContent = "No profile found. Create one with:  codex-byok profile add <name> --base-url <url> --token-stdin";
+      box.append(p);
+      return;
+    }
+    for (const row of rows) box.append(profileRow(row));
+  }
+
+  function renderModels() {
+    const q = $("filter").value.trim().toLowerCase();
+    const box = $("models");
+    box.replaceChildren();
+    const shown = allModels.filter((m) => !q || m.toLowerCase().includes(q));
+    if (!shown.length) {
+      const p = document.createElement("div");
+      p.id = "empty";
+      p.textContent = allModels.length ? "Nothing matches that filter." : "No models were listed by any profile.";
+      box.append(p);
+      return;
+    }
+    for (const entry of shown) {
+      const [profile, ...rest] = entry.split(":");
+      const model = rest.join(":");
+      const div = document.createElement("div");
+      div.className = "model" + (entry === activeModel ? " active" : "");
+
+      const id = document.createElement("span");
+      id.className = "id";
+      id.textContent = model;
+      div.append(id);
+
+      const who = document.createElement("span");
+      who.className = "meta";
+      who.textContent = profile;
+      who.style.marginLeft = "auto";
+      who.style.color = "var(--dim)";
+      div.append(who);
+
+      const btn = document.createElement("button");
+      btn.textContent = entry === activeModel ? "active" : "use";
+      btn.disabled = entry === activeModel;
+      btn.onclick = async () => {
+        status("applying " + entry + " …");
+        const res = await window.byok.apply(entry);
+        if (res.ok) {
+          activeModel = entry;
+          renderModels();
+          status("active: " + entry + "  (config.toml backed up)");
+        } else {
+          status((res.error || res.stderr || "apply failed").trim(), true);
+        }
+      };
+      div.append(btn);
+      box.append(div);
+    }
+  }
+
+  function renderDrift(res) {
+    const box = $("drift");
+    box.replaceChildren();
+    if (!res.ok) {
+      const p = document.createElement("div");
+      p.id = "empty";
+      p.textContent = res.error || "could not read the drift report";
+      box.append(p);
+      return;
+    }
+    if (!res.problems.length) {
+      const row = document.createElement("div");
+      row.className = "row";
+      const pill = document.createElement("span");
+      pill.className = "pill ok";
+      pill.textContent = "ok";
+      row.append(pill);
+      const t = document.createElement("span");
+      t.className = "meta";
+      t.textContent = "nothing our launcher depends on has moved since the last fingerprint";
+      row.append(t);
+      box.append(row);
+      return;
+    }
+    const ul = document.createElement("ul");
+    ul.className = "problems";
+    for (const p of res.problems) {
+      const li = document.createElement("li");
+      const id = document.createElement("span");
+      id.className = "id";
+      id.textContent = p.id;
+      li.append(id);
+      const d = document.createElement("span");
+      d.className = "detail";
+      d.textContent = p.detail;
+      li.append(d);
+      ul.append(li);
+    }
+    box.append(ul);
+  }
+
+  async function refresh() {
+    status("reading profiles …");
+    const prof = await window.byok.profiles();
+    if (!prof.ok) {
+      renderProfiles([]);
+      status(prof.error || "could not read profiles", true);
+      return;
+    }
+    renderProfiles(prof.rows);
+    allModels = prof.rows.flatMap((r) => (r.models || []).map((m) => `${r.name}:${m}`));
+    renderModels();
+
+    status("reading app drift …");
+    renderDrift(await window.byok.drift());
+    status(allModels.length + " models across " + prof.rows.length + " profile(s)");
+  }
+
+  $("refresh").onclick = refresh;
+  $("filter").oninput = renderModels;
+  refresh();
+</script>
+</body>
+</html>

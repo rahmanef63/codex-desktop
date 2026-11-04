@@ -1,0 +1,42 @@
+appId: dev.manef.codex-byok
+productName: Codex BYOK
+
+copyright: Copyright © 2026 Rahman
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - src/**/*
+  - package.json
+
+# The three scripts and the drift state live OUTSIDE the asar, because they are executed as
+# ordinary processes. Packing them into app.asar would make them unexecutable.
+extraResources:
+  - from: ../../bin/codex-byok
+    to: bin/codex-byok
+  - from: ../../bin/codex-version-drift
+    to: bin/codex-version-drift
+
+asar: true
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.png
+  # UNSIGNED ON PURPOSE. A code-signing certificate costs money every year, and the user asked
+  # to avoid anything paid. `signExecutable: false` skips only the signature — the icon and the
+  # version metadata are still written into the exe. Windows SmartScreen will warn on first run
+  # ("unrecognised app"); that is the price of not buying a certificate, not a defect.
+  signExecutable: false
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Codex BYOK
+  deleteAppDataOnUninstall: false
