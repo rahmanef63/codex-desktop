@@ -982,3 +982,52 @@ Windows). Dua run pertama saya salah sasaran dan tercatat di home asli (`provide
 - Translator 9router (`type:"namespace"`, `encrypted_content`): perbaikan gateway, bukan repo
   ini. Tanpa itu, penalaran antar-turn tetap tidak terbawa untuk upstream non-OpenAI.
 - `cx/gpt-6.1-sol` tetap ada sebagai fallback gambar.
+
+## 14. Dua probe yang mengukur dirinya sendiri, bukan app (2026-11-05)
+
+Ditemukan saat memverifikasi §13. Keduanya **bukan** akibat perubahan default, tapi keduanya
+membuat verifikasi jadi mustahil, jadi diperbaiki dulu.
+
+### 14a. `codex-caps-quicktest` pin hash CLI yang sudah tidak ada
+
+`CODEX_EXE` di-hardcode ke `bin/22cfb1d302613eae/codex.exe`. Setelah Store menaruh
+`a159911ff70742e9`, direktori itu hilang. Hasilnya **22 dari 22 pengukuran FAIL**, termasuk
+yang tidak ada hubungannya dengan gateway:
+
+```
+& : The term '...\bin\22cfb1d302613eae\codex.exe' is not recognized ...
+```
+
+`codex-real-quicktest` sudah punya resolver "newest staged CLI"; caps tidak pernah ikut.
+Sekarang satu resolver: `bin/codex-exe` (CONTRACT §5: salinan kedua aturan = defect).
+
+### 14b. Skrip `bin/` dijalankan lewat symlink `~/.local/bin`
+
+`~/.local/bin/{qcheck,codex-real-quicktest,codex-caps-quicktest}` **bukan** symlink — itu
+salinan beku dari 30 Okt – 2 Nov. `qcheck` karenanya menjalankan kode lama, bukan repo:
+`qcheck codex` melaporkan `exe: ...22cfb1d302613eae...` padahal repo sudah memakai resolver.
+
+Setelah dijadikan symlink, muncul bug kedua: `dirname "$0"` menunjuk `~/.local/bin`, jadi
+`$SELF_DIR/codex-exe` tidak ada dan caps gagal lagi dengan pesan lain. Perbaikan:
+`readlink -f "${BASH_SOURCE[0]}"` sebelum path sibling dibangun. Salinan asli disimpan di
+`/tmp/opencode/bin-bak`.
+
+### Bukti setelah perbaikan
+
+| probe | hasil |
+| --- | --- |
+| `qcheck codex` (dari `/tmp`, lewat symlink) | 5 passed + **22 passed, 0 failed** |
+| `qcheck shortcut` | ok |
+| `app/tests/run-tests.mjs` | 7/7 (kini termasuk dua `.ps1`) |
+
+### 14c. `install-shortcuts.ps1` menulis ikon yang version-pinned
+
+Installer punya resolver sendiri yang mengembalikan path **di dalam**
+`OpenAI.Codex_26.1029.7803.0_...`, lalu `tests/shortcut-contract.sh` R4 menolaknya — benar,
+karena folder itu pindah tiap update Store. Repo sudah punya `scripts/resolve-codex-icon.ps1`
+yang menyalin ikon ke `%LOCALAPPDATA%\codex-desktop\icon.ico`; installer tidak memakainya.
+Sekarang memakai, dan path paket hanya jadi fallback berperingatan.
+
+Catatan jujur: saya sendiri yang menulis ikon rusak itu ke dua shortcut saat menjalankan
+installer untuk pertama kali (sebelum memperbaiki installernya). Sudah ditimpa ulang lewat
+installer yang benar; `R4` PASS untuk kedua shortcut.
