@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# One question: is the Windows desktop healthy?
+#
+#   desktop-audit            # table of every .lnk on both desktops + a verdict
+#   desktop-audit --json     # same data, machine-readable
+#
+# "Healthy" means two things per shortcut: the icon file it points at still exists, and the
+# program it launches still exists. Both are separate failures. A shortcut whose icon lives
+# inside the MSIX folder is healthy today and broken tomorrow, because a Store update moves
+# the version into the folder name — that is what this check exists to catch.
+#
+# Exit: 0 every icon and target resolves, 1 something rotted, 2 could not measure (not Windows,
+# or powershell.exe missing). Read-only: it opens the shortcuts and reads them. It never writes
+# a shortcut, never launches one, never stops anything.
+set -uo pipefail
+
+JSON=0
+case "${1:-}" in
+--json) JSON=1 ;;
+-h | --help)
+	sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+	exit 0
+	;;
+"") ;;
+*)
+	echo "unknown argument: $1 (try --help)" >&2
+	exit 2
+	;;
+esac
+
+if ! command -v powershell.exe >/dev/null 2>&1; then
+	echo 'desktop-audit: powershell.exe not found — this check only means anything on Windows.' >&2
+	exit 2
+fi
+
+# The enumeration lives in PowerShell because only it can read a .lnk. Everything else here is
+# plumbing: collect, format, set the exit code.
+read -r -d '' PS <<'PSEOF'
+param([int]$Json = 0)
+$ErrorActionPreference = 'Stop'
+$sh = New-Object -ComObject WScript.Shell
+
+function Resolve-Path2($p) {
+    if (-not $p -or $p.Trim() -eq '') { return $null }
+    $p = [Environment]::ExpandEnvironmentVariables($p.Trim().Trim('"'))
+    # Test-Path -LiteralPath throws on some malformed paths; treat that as "missing".
+    try { return (Test-Path -LiteralPath $p) } catch { return $false }
+}
+
+$rows = @()
+$desktops = @()
+foreach ($d in @("$env:USERPROFILE\Desktop", "$env:PUBLIC\Desktop")) {
+    if (-not (Test-Path -LiteralPath $d)) { continue }
+    $item = Get-Item -LiteralPath $d -Force
+    $desktops += [pscustomobject]@{
+        Path      = $d
+        IsJunction = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        Target    = ($item.Target -join ';')
+    }
+    foreach ($f in Get-ChildItem -LiteralPath $d -Filter *.lnk -Force -ErrorAction SilentlyContinue) {
+        $l = $sh.CreateShortcut($f.FullName)
+        $iconRaw = $l.IconLocation
+        $iconPath = if ($iconRaw) { ($iconRaw -split ',')[0] } else { '' }
+        $iconIsDefault = [string]::IsNullOrWhiteSpace($iconPath)
+        # An empty IconLocation means Windows falls back to the target's own icon.
+        $iconCheck = if ($iconIsDefault) { $l.TargetPath } else { $iconPath }
+        $iconOk = Resolve-Path2 $iconCheck
+        $tgtOk = Resolve-Path2 $l.TargetPath
+
+        # The target is usually powershell.exe, so a stale launcher path hides in the arguments.
+        # Any quoted path with an executable extension is checked; nothing else is parsed.
+        $scriptMissing = @()
+        foreach ($m in [regex]::Matches($l.Arguments, '"([^"]+\.(?:ps1|exe|cmd|bat|py|sh))"')) {
+            $cand = $m.Groups[1].Value
+            if ((Resolve-Path2 $cand) -ne $true) { $scriptMissing += $cand }
+        }
+
+        $status = @()
+        if ($iconOk -ne $true) { $status += 'ICON-MISSING' }
+        if ($tgtOk -ne $true) { $status += 'TARGET-MISSING' }
+        if ($scriptMissing.Count -gt 0) { $status += 'SCRIPT-MISSING' }
+        if ($status.Count -eq 0) { $status += 'OK' }
+
+        $rows += [pscustomobject]@{
+            Status    = ($status -join '+')
+            Shortcut  = $f.BaseName
+            Where     = if ($d -like '*Public*') { 'Public' } else { 'User' }
+            Mtime     = $f.LastWriteTime.ToString('yyyy-MM-dd')
+            Target    = $l.TargetPath
+            Arguments = $l.Arguments
+            Icon      = if ($iconIsDefault) { '(default: target)' } else { $iconPath }
+            IconOk    = [bool]$iconOk
+            TargetOk  = [bool]$tgtOk
+            ScriptMissing = ($scriptMissing -join ';')
+        }
+    }
+}
+
+$bad = @($rows | Where-Object { -not $_.IconOk -or -not $_.TargetOk -or $_.ScriptMissing })
+
+if ($Json) {
+    [pscustomobject]@{ desktops = $desktops; shortcuts = $rows; bad = $bad.Count } |
+        ConvertTo-Json -Depth 5
+} else {
+    foreach ($d in $desktops) {
+        $note = if ($d.IsJunction) { "  (junction -> $($d.Target))" } else { '' }
+        Write-Output "desktop: $($d.Path)$note"
+    }
+    Write-Output ''
+    $rows | Sort-Object Status, Shortcut |
+        Format-Table -AutoSize -Wrap `
+            @{ n = 'STATUS'; e = { $_.Status } },
+            @{ n = 'WHERE'; e = { $_.Where } },
+            @{ n = 'SHORTCUT'; e = { $_.Shortcut } },
+            @{ n = 'SINCE'; e = { $_.Mtime } },
+            @{ n = 'ICON'; e = { if ($_.IconOk) { 'ok' } else { 'MISSING' } } },
+            @{ n = 'TARGET'; e = { $_.Target } } |
+        Out-String -Width 200
+    $total = $rows.Count
+    $badIcon = @($rows | Where-Object { -not $_.IconOk }).Count
+    $badTgt = @($rows | Where-Object { -not $_.TargetOk }).Count
+    $badScript = @($rows | Where-Object { $_.ScriptMissing }).Count
+    Write-Output "$total shortcuts | $badIcon missing icon | $badTgt missing target | $badScript missing launch script"
+    if ($bad.Count -gt 0) {
+        Write-Output ''
+        foreach ($r in ($bad | Where-Object { -not $_.IconOk } | Sort-Object Icon -Unique)) {
+            Write-Output "missing icon:   $($r.Icon)"
+        }
+        foreach ($r in ($bad | Where-Object { $_.ScriptMissing })) {
+            Write-Output "missing script: $($r.ScriptMissing)   ($($r.Shortcut))"
+        }
+    } else {
+        Write-Output 'verdict: healthy'
+    }
+}
+
+if ($bad.Count -gt 0) { exit 1 } else { exit 0 }
+PSEOF
+
+tmp=$(mktemp "${TMPDIR:-/tmp}/desktop-audit.XXXXXX.ps1")
+trap 'rm -f "$tmp"' EXIT
+printf '%s\n' "$PS" >"$tmp"
+
+win_tmp=$(wslpath -w "$tmp" 2>/dev/null || echo "$tmp")
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_tmp" -Json "$JSON"
+exit $?
