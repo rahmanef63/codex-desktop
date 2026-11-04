@@ -35,6 +35,8 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `scripts/mcp_echo.py` | Harmless MCP server used to prove MCP survives the gateway path. |
 | `bin/codex-version-drift` | Records a fingerprint of everything our tooling depends on and reports when an app update moves it. Answers "did the app change under us". |
 | `bin/codex-byok` | BYOK profiles: list, add, pick a model, apply. Probes each profile's gateway and reports what it can really serve. |
+| `bin/codex-onboard` | **Start here if you just cloned this.** Checks the app, resolves the home, then opens the local setup page. Never writes a credential itself. |
+| `bin/codex-setup` | The local setup page: OAuth gateway, API key, or custom endpoint. Tests the endpoint, refuses a model it does not serve, writes the profile 0600. |
 | `bin/desktop-audit` | Every `.lnk` on both Windows desktops, with its icon, target and launch script checked for existence. Exits 1 if any of them rotted. Answers "is my desktop healthy". |
 | `docs/DESKTOP.md` | What the desktop shortcuts actually are, why there were four Codex entries, which to keep, and how to make the icon survive a Store update. |
 | `app/` | One Electron window over those two. Unsigned on purpose. Not a Codex clone. |

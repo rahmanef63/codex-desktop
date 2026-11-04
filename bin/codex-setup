@@ -1,0 +1,564 @@
+#!/usr/bin/env python3
+"""Local setup page for a Codex BYOK profile.
+
+Why this exists: a new user has an OpenAI-compatible endpoint (OAuth-backed gateway, a
+raw API key, or a custom URL) and needs three things written correctly before Codex can
+use it — a `[model_providers.*]` table, the top-level `model`, and a catalog the app can
+read. Getting those wrong is silent: the app opens, the model list is empty, and nothing
+says why.
+
+This serves ONE page on 127.0.0.1, writes the profile when the form is submitted, and
+exits when the browser is done. It is stdlib only — no pip install, no npm, no build.
+
+Security, because this holds a credential:
+  * binds 127.0.0.1 only, never 0.0.0.0;
+  * a random token in the URL path, so another local user cannot reach it blind;
+  * POST only for the write, with the token checked again;
+  * the key is never echoed back, never logged, and written 0600;
+  * the process exits after one successful write, or after --timeout seconds.
+
+Usage:
+  codex-setup                      # serve, open the browser, wait
+  codex-setup --no-browser         # print the URL instead
+  codex-setup --port 8791
+  codex-setup --timeout 900
+  codex-setup --print-url-only
+
+Exit: 0 a profile was written, 1 nothing written, 2 could not start.
+"""
+import argparse
+import html
+import json
+import os
+import secrets
+import socket
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import codex_home
+except ImportError:
+    codex_home = None
+
+PAGE_TITLE = "Codex — connect a model"
+
+
+# --------------------------------------------------------------------------- writing
+
+PROFILE_TEMPLATE = '''# BYOK profile written by codex-setup on {when}.
+{note}
+model_provider = "{pid}"
+model = "{model}"
+
+[model_providers.{pid}]
+name = "{display}"
+base_url = "{base_url}"
+{auth}
+wire_api = "responses"
+requires_openai_auth = false
+'''
+
+
+def clean_base_url(raw):
+    """Normalise an endpoint. Returns (url, error).
+
+    Accepts what people actually paste: with or without a trailing slash, with or without
+    /v1, and a bare host. Codex appends `/responses`, so the stored value must end at the
+    API root, not at the endpoint itself.
+    """
+    url = (raw or "").strip()
+    if not url:
+        return None, "base URL is required"
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return None, "base URL must start with http:// or https://"
+    url = url.rstrip("/")
+    for suffix in ("/chat/completions", "/responses", "/completions"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+    if not url.endswith("/v1") and not urllib.parse.urlparse(url).path.endswith("/v1"):
+        # Not every gateway uses /v1, so this is a hint rather than a rewrite. Appending it
+        # blindly would 404 a gateway that serves at the root.
+        pass
+    return url, None
+
+
+def write_profile(home, name, base_url, token, model, display):
+    """Write `<home>/<name>.config.toml` mode 0600. Returns (path, backup_or_None)."""
+    os.makedirs(home, exist_ok=True)
+    pid = "byok_" + "".join(c if c.isalnum() else "_" for c in name).strip("_").lower()
+    auth = f'experimental_bearer_token = "{token}"'
+    note = ("# The key is stored INLINE in this file (mode 600). Codex cannot read a shell\n"
+            "# environment on Windows, so this is the form that actually works.")
+    body = PROFILE_TEMPLATE.format(
+        when=time.strftime("%Y-%m-%d %H:%M"),
+        note=note,
+        pid=pid,
+        display=display or name,
+        base_url=base_url,
+        auth=auth,
+        model=model or "",
+    )
+    path = os.path.join(home, f"{name}.config.toml")
+    backup = None
+    if os.path.exists(path):
+        backup = path + ".bak"
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            previous = fh.read()
+        with open(backup, "w", encoding="utf-8") as fh:
+            fh.write(previous)
+    # Write, then chmod, then rename: a half-written profile is worse than none.
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return path, backup
+
+
+def probe_endpoint(base_url, token, timeout=15):
+    """Ask the endpoint which models it serves. Returns (ids, error).
+
+    This is the difference between "saved" and "works": a profile pointing at a dead URL
+    produces a Codex window with an empty model list and no explanation.
+    """
+    url = base_url.rstrip("/") + "/models"
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.load(resp)
+        ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        return ids, None
+    except urllib.error.HTTPError as e:
+        return [], f"HTTP {e.code} {e.reason}"
+    except urllib.error.URLError as e:
+        return [], f"cannot reach it ({e.reason})"
+    except (socket.timeout, json.JSONDecodeError, OSError) as e:
+        return [], f"{type(e).__name__}: {e}"
+
+
+# --------------------------------------------------------------------------- the page
+
+CSS = """
+:root{--bg:#0f1113;--panel:#16191d;--line:#272b31;--ink:#e8eaed;--dim:#9aa3ad;
+--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--accent:#7dd3fc}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:14px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:660px;margin:0 auto;padding:40px 24px 64px}
+h1{font-size:20px;font-weight:600;margin:0 0 6px;letter-spacing:-.01em}
+.sub{color:var(--dim);margin:0 0 28px;font-size:13px}
+fieldset{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+margin:0 0 18px;padding:16px 18px 18px}
+legend{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
+font-weight:600;padding:0 6px}
+label{display:block;font-size:12.5px;margin:12px 0 5px;color:var(--ink)}
+label:first-of-type{margin-top:0}
+.hint{font-size:11.5px;color:var(--dim);margin:4px 0 0}
+input,select{width:100%;font:inherit;font-size:13px;color:var(--ink);background:#111419;
+border:1px solid var(--line);border-radius:7px;padding:9px 11px}
+input:focus,select:focus{outline:1px solid #2b5a73;border-color:#2b5a73}
+input[type=radio]{width:auto;margin-right:7px}
+.kind{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:4px}
+.kind label{display:flex;align-items:center;margin:0;font-size:13px}
+button{font:inherit;font-size:13.5px;font-weight:500;border-radius:8px;padding:10px 18px;
+cursor:pointer;border:1px solid var(--line);background:#20242a;color:var(--ink)}
+button.primary{background:#12303d;border-color:#2b5a73;color:var(--accent)}
+button:hover{filter:brightness(1.15)}
+button:disabled{opacity:.5;cursor:default;filter:none}
+.row{display:flex;gap:12px;align-items:center;margin-top:20px}
+.status{margin-top:16px;font-size:13px;min-height:20px}
+.status.ok{color:var(--ok)}.status.bad{color:var(--bad)}.status.warn{color:var(--warn)}
+pre{background:#0b0d0f;border:1px solid var(--line);border-radius:8px;padding:12px;
+overflow:auto;font-size:12px;line-height:1.5;margin:10px 0 0;max-height:260px}
+code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+.hidden{display:none}
+"""
+
+PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title><style>{css}</style></head>
+<body><main>
+<h1>{title}</h1>
+<p class="sub">Writes one Codex profile so the app can talk to your endpoint. Nothing is
+uploaded anywhere: this page is served from your own machine and closes when done.</p>
+
+<form id="form">
+<fieldset>
+<legend>1 · Connection type</legend>
+<div class="kind">
+<label><input type="radio" name="kind" value="apikey" checked> API key</label>
+<label><input type="radio" name="kind" value="oauth"> OAuth gateway</label>
+<label><input type="radio" name="kind" value="custom"> Custom endpoint</label>
+</div>
+<p class="hint" id="kindhint">A bearer token your provider issued. Most common.</p>
+
+<label for="base_url">Base URL</label>
+<input id="base_url" name="base_url" placeholder="https://api.example.com/v1" required>
+<p class="hint" id="urlhint">The API root. Codex appends <code>/responses</code> itself, so a
+trailing <code>/chat/completions</code> is stripped.</p>
+
+<label for="token" id="tokenlabel">API key</label>
+<input id="token" name="token" type="password" placeholder="sk-..." required
+       autocomplete="off" spellcheck="false">
+<p class="hint">Stored inline in the profile, mode 0600. Never sent anywhere but your
+endpoint, and never shown again after you submit.</p>
+</fieldset>
+
+<fieldset>
+<legend>2 · Profile</legend>
+<label for="name">Profile name</label>
+<input id="name" name="name" value="local" pattern="[A-Za-z0-9._-]+" required>
+<p class="hint">Becomes <code>&lt;name&gt;.config.toml</code>. Codex activates it with
+<code>codex -p &lt;name&gt;</code>.</p>
+
+<label for="model">Default model</label>
+<input id="model" name="model" placeholder="left empty: the first served model">
+<p class="hint">Leave blank and the page picks the first model your endpoint reports.</p>
+
+<button type="button" id="test">Test connection</button>
+<div class="status" id="status"></div>
+<pre id="out" class="hidden"></pre>
+</fieldset>
+
+<div class="row">
+<button type="submit" class="primary" id="save" disabled>Save profile</button>
+<span class="hint">Enabled after a successful test.</span>
+</div>
+</form>
+</main>
+<script>
+const TOKEN = {token_literal};
+const form = document.getElementById('form');
+const statusEl = document.getElementById('status');
+const out = document.getElementById('out');
+const saveBtn = document.getElementById('save');
+const testBtn = document.getElementById('test');
+
+const HINTS = {{
+  apikey: ['A bearer token your provider issued. Most common.',
+           'The API root, e.g. https://api.openai.com/v1', 'API key'],
+  oauth:  ['A gateway that holds the OAuth session for you. The value below is its bearer token, not a browser cookie.',
+           'Your gateway root, e.g. http://127.0.0.1:20128/v1', 'Gateway token'],
+  custom: ['Any OpenAI-compatible server: a local runtime, a proxy, a self-hosted gateway.',
+           'Whatever your server exposes, e.g. http://127.0.0.1:8080/v1', 'Token (blank if none)']
+}};
+function syncKind() {{
+  const k = form.kind.value;
+  const [kh, uh, tl] = HINTS[k];
+  document.getElementById('kindhint').textContent = kh;
+  document.getElementById('urlhint').innerHTML = uh;
+  document.getElementById('tokenlabel').textContent = tl;
+  if (k === 'custom') document.getElementById('token').required = false;
+  else document.getElementById('token').required = true;
+  saveBtn.disabled = true;
+}}
+form.querySelectorAll('input[name=kind]').forEach(r => r.onchange = syncKind);
+
+function payload() {{
+  return {{
+    base_url: document.getElementById('base_url').value.trim(),
+    token: document.getElementById('token').value.trim(),
+    name: document.getElementById('name').value.trim(),
+    model: document.getElementById('model').value.trim(),
+    kind: form.kind.value
+  }};
+}}
+
+async function post(path, body) {{
+  const r = await fetch(path, {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json', 'X-Setup-Token': TOKEN}},
+    body: JSON.stringify(body)
+  }});
+  return await r.json();
+}}
+
+testBtn.onclick = async () => {{
+  statusEl.className = 'status';
+  statusEl.textContent = 'Testing…';
+  out.classList.add('hidden');
+  saveBtn.disabled = true;
+  try {{
+    const res = await post('/api/test', payload());
+    if (res.ok) {{
+      statusEl.className = 'status ok';
+      statusEl.textContent = res.models.length + ' model(s) reachable. Pick one below, then save.';
+      out.classList.remove('hidden');
+      out.textContent = res.models.join('\\n');
+      const modelInput = document.getElementById('model');
+      if (!modelInput.value && res.models.length) modelInput.placeholder = res.models[0];
+      saveBtn.disabled = false;
+    }} else {{
+      statusEl.className = 'status bad';
+      statusEl.textContent = res.error || 'failed';
+    }}
+  }} catch (e) {{
+    statusEl.className = 'status bad';
+    statusEl.textContent = 'request failed: ' + e;
+  }}
+}};
+
+form.onsubmit = async (ev) => {{
+  ev.preventDefault();
+  saveBtn.disabled = true;
+  statusEl.className = 'status';
+  statusEl.textContent = 'Saving…';
+  try {{
+    const res = await post('/api/save', payload());
+    if (res.ok) {{
+      statusEl.className = 'status ok';
+      statusEl.textContent = res.message;
+      out.classList.remove('hidden');
+      out.textContent = res.detail || '';
+      document.getElementById('token').value = '';
+    }} else {{
+      statusEl.className = 'status bad';
+      statusEl.textContent = res.error || 'failed';
+      saveBtn.disabled = false;
+    }}
+  }} catch (e) {{
+    statusEl.className = 'status bad';
+    statusEl.textContent = 'request failed: ' + e;
+    saveBtn.disabled = false;
+  }}
+}};
+syncKind();
+</script></body></html>
+"""
+
+DONE_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Profile saved</title><style>{css}</style></head><body><main>
+<h1>Profile saved</h1>
+<p class="sub">You can close this tab. The setup process has exited.</p>
+<pre>profile : {path}{backup}
+home    : {home}
+model   : {model}
+
+Next:
+  codex -p {name}         # run Codex with this profile
+  bin/codex-byok profile list   # verify it is readable</pre>
+</main></body></html>
+"""
+
+
+def model_list_html(ids):
+    return "\n".join(html.escape(i) for i in ids)
+
+
+# --------------------------------------------------------------------------- server
+
+class State:
+    def __init__(self, home, timeout):
+        self.home = home
+        self.timeout = timeout
+        self.token = secrets.token_urlsafe(24)
+        self.saved = None  # {"path":..., "name":..., "model":..., "backup":...}
+        self.started = time.time()
+
+
+def make_handler(state):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):
+            # Silence the default stderr spam: it would print query strings.
+            return
+
+        def _send(self, code, body, ctype="application/json"):
+            raw = body.encode("utf-8") if isinstance(body, str) else body
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _authorised(self):
+            # The token lives in the URL for the page, and in a header for the API. A blind
+            # scan of localhost ports cannot guess it.
+            supplied = self.headers.get("X-Setup-Token") or ""
+            return secrets.compare_digest(supplied, state.token)
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 2 and parts[0] == "s" and secrets.compare_digest(parts[1], state.token):
+                body = PAGE.format(title=PAGE_TITLE, css=CSS,
+                                   token_literal=json.dumps(state.token))
+                self._send(200, body, "text/html; charset=utf-8")
+                return
+            if parsed.path == "/" and state.saved:
+                b = state.saved
+                body = DONE_PAGE.format(css=CSS, path=html.escape(b["path"]),
+                                        backup=f"\nbackup  : {b['backup']}" if b["backup"] else "",
+                                        home=html.escape(state.home),
+                                        model=html.escape(b["model"] or "(endpoint default)"),
+                                        name=html.escape(b["name"]))
+                self._send(200, body, "text/html; charset=utf-8")
+                return
+            self._send(404, json.dumps({"ok": False, "error": "not found"}))
+
+        def do_POST(self):
+            if not self._authorised():
+                self._send(403, json.dumps({"ok": False, "error": "bad setup token"}))
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 64 * 1024:
+                self._send(413, json.dumps({"ok": False, "error": "body too large"}))
+                return
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                self._send(400, json.dumps({"ok": False, "error": "invalid JSON"}))
+                return
+
+            if self.path == "/api/test":
+                url, err = clean_base_url(body.get("base_url"))
+                if err:
+                    self._send(200, json.dumps({"ok": False, "error": err}))
+                    return
+                token = (body.get("token") or "").strip()
+                if not token and body.get("kind") != "custom":
+                    self._send(200, json.dumps({"ok": False, "error": "an API key is required"}))
+                    return
+                ids, perr = probe_endpoint(url, token or "none")
+                if perr:
+                    self._send(200, json.dumps({"ok": False, "error": perr}))
+                    return
+                self._send(200, json.dumps({"ok": True, "models": ids[:200]}))
+                return
+
+            if self.path == "/api/save":
+                url, err = clean_base_url(body.get("base_url"))
+                if err:
+                    self._send(200, json.dumps({"ok": False, "error": err}))
+                    return
+                name = (body.get("name") or "").strip()
+                if not name or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" for c in name):
+                    self._send(200, json.dumps({"ok": False, "error": "profile name may only use letters, digits, dot, underscore, dash"}))
+                    return
+                token = (body.get("token") or "").strip()
+                model = (body.get("model") or "").strip()
+                # A model that the endpoint does not serve is the most common silent failure, so
+                # resolve it here rather than letting Codex open with an empty list.
+                ids, perr = probe_endpoint(url, token or "none")
+                if perr:
+                    self._send(200, json.dumps({"ok": False, "error": f"cannot save: {perr}"}))
+                    return
+                if not model:
+                    model = ids[0] if ids else ""
+                elif model not in ids:
+                    self._send(200, json.dumps({
+                        "ok": False,
+                        "error": f"'{model}' is not served by this endpoint. Served: "
+                                 + ", ".join(ids[:8]) + ("…" if len(ids) > 8 else "")}))
+                    return
+                try:
+                    path, backup = write_profile(state.home, name, url, token, model, name)
+                except OSError as e:
+                    self._send(200, json.dumps({"ok": False, "error": f"cannot write: {e}"}))
+                    return
+                state.saved = {"path": path, "name": name, "model": model, "backup": backup}
+                detail = ", ".join(ids[:20]) if ids else "(endpoint reported no model list)"
+                self._send(200, json.dumps({
+                    "ok": True,
+                    "message": f"Saved. Run: codex -p {name}",
+                    "detail": f"{path}\n{len(ids)} model(s): {detail}"}))
+                return
+
+            self._send(404, json.dumps({"ok": False, "error": "not found"}))
+
+    return Handler
+
+
+def pick_port(preferred):
+    """Prefer the requested port, fall back to any free one. Never fail for that reason."""
+    if preferred:
+        try:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", preferred))
+            return preferred
+        except OSError:
+            pass
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--home", default=None, help="CODEX_HOME to write the profile into")
+    ap.add_argument("--port", type=int, default=8790)
+    ap.add_argument("--timeout", type=int, default=900, help="exit after N seconds (default 900)")
+    ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--print-url-only", action="store_true")
+    args = ap.parse_args()
+
+    home = args.home
+    if not home:
+        if codex_home is None:
+            home = os.path.join(os.path.expanduser("~"), ".codex")
+        else:
+            resolved = codex_home.resolve()
+            home = resolved.get("real") or resolved.get("clone")
+            if not home:
+                print("cannot resolve a Codex home; pass --home", file=sys.stderr)
+                return 2
+
+    port = pick_port(args.port)
+    state = State(home, args.timeout)
+    url = f"http://127.0.0.1:{port}/s/{state.token}"
+
+    if args.print_url_only:
+        print(url)
+        return 0
+
+    try:
+        httpd = HTTPServer(("127.0.0.1", port), make_handler(state))
+    except OSError as e:
+        print(f"cannot bind 127.0.0.1:{port}: {e}", file=sys.stderr)
+        return 2
+
+    sys.stdout.reconfigure(line_buffering=True)
+    print(f"setup page: {url}")
+    print(f"writing to: {home}")
+    print("leave this running; it exits after you save, or after "
+          f"{args.timeout}s. Ctrl-C cancels.")
+
+    if not args.no_browser:
+        threading.Thread(target=lambda: webbrowser.open(url), daemon=True).start()
+
+    httpd.timeout = 1.0
+    while not state.saved and (time.time() - state.started) < args.timeout:
+        httpd.handle_request()
+
+    httpd.server_close()
+    if state.saved:
+        b = state.saved
+        print(f"\nsaved  {b['path']}")
+        if b["backup"]:
+            print(f"backup {b['backup']}")
+        print(f"model  {b['model'] or '(endpoint default)'}")
+        print(f"\nrun:  codex -p {b['name']}")
+        return 0
+    print("\nnothing saved — timed out or cancelled", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    # Line-buffered unconditionally: this tool's whole job is to print a URL that a user or a
+    # wrapper script must read while it is still running. Block buffering on a pipe breaks that.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+    sys.exit(main())

@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# One command for someone who just cloned this repo and has no Codex profile yet.
+#
+# What it does, in order, and why that order:
+#   1. checks the app is installed        — nothing below matters if it is not
+#   2. finds the Codex home               — one resolver, not a hardcoded username
+#   3. checks for an existing profile     — an overwrite without asking is not "setup"
+#   4. serves the local setup page        — the page writes the profile
+#   5. verifies what was written          — a saved file is not a working profile
+#
+# It never writes a credential itself. The page does that, once, and the key never
+# appears in this script's output or in shell history.
+#
+# Usage:
+#   bin/codex-onboard                 # full flow
+#   bin/codex-onboard --check         # report state, write nothing
+#   bin/codex-onboard --no-browser    # print the URL instead of opening it
+#
+# Exit: 0 ready to run Codex, 1 not ready, 2 cannot proceed.
+
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHECK_ONLY=0
+BROWSER_ARG=()
+
+for arg in "$@"; do
+	case "$arg" in
+	--check) CHECK_ONLY=1 ;;
+	--no-browser) BROWSER_ARG=(--no-browser) ;;
+	-h | --help)
+		sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+		exit 0
+		;;
+	*)
+		echo "unknown argument: $arg" >&2
+		exit 2
+		;;
+	esac
+done
+
+say() { printf '%s\n' "$*"; }
+ok() { printf '  PASS  %s\n' "$*"; }
+bad() { printf '  FAIL  %s\n' "$*"; }
+info() { printf '  INFO  %s\n' "$*"; }
+
+say "codex-onboard — get a BYOK profile in place"
+say ""
+
+# ---------------------------------------------------------------- 1. the app
+say "1 · the app"
+APP_DIR=""
+if command -v powershell.exe >/dev/null 2>&1; then
+	APP_DIR=$(powershell.exe -NoProfile -Command \
+		"(Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1).InstallLocation" 2>/dev/null | tr -d '\r\n')
+fi
+if [ -n "${APP_DIR:-}" ]; then
+	ok "Codex Desktop installed: $(basename "$APP_DIR")"
+else
+	info "cannot see the MSIX from here (not Windows/WSL, or not installed)"
+	info "that is not fatal: a profile written now still works once the app exists"
+fi
+
+# ---------------------------------------------------------------- 2. the home
+say ""
+say "2 · the Codex home"
+HOME_JSON="$("$HERE/codex-home" --json 2>/dev/null)"
+if ! printf '%s' "$HOME_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") else 1)' 2>/dev/null; then
+	bad "cannot resolve a Codex home:"
+	printf '%s\n' "$HOME_JSON" | sed 's/^/        /'
+	say ""
+	say "Set CODEX_HOME to the directory Codex actually uses, then re-run."
+	exit 2
+fi
+REAL_HOME=$(printf '%s' "$HOME_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("real") or "")')
+CLONE_HOME=$(printf '%s' "$HOME_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("clone") or "")')
+SOURCE=$(printf '%s' "$HOME_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source") or "")')
+# Where the profile is WRITTEN. An explicit CODEX_HOME is an instruction: honour it.
+# Otherwise the real (ChatGPT-side) home is the right place, because that is the one the
+# app reads when it is started without -p. Writing to the clone home while reporting the
+# real one is how a user ends up with a profile Codex never sees.
+if [ -n "${CODEX_HOME:-}" ]; then
+	TARGET_HOME="$CODEX_HOME"
+	info "writing to CODEX_HOME: $TARGET_HOME"
+else
+	TARGET_HOME="$REAL_HOME"
+fi
+ok "profile home: $TARGET_HOME"
+info "resolved by: $SOURCE"
+[ -n "$CLONE_HOME" ] && [ "$CLONE_HOME" != "$TARGET_HOME" ] && info "clone home : $CLONE_HOME"
+if [ ! -d "$REAL_HOME" ]; then
+	info "$REAL_HOME does not exist yet; Codex creates it on first run"
+fi
+
+# ---------------------------------------------------------------- 3. existing profiles
+say ""
+say "3 · existing profiles"
+PROFILES=$("$HERE/codex-byok" --home "$TARGET_HOME" profile list --json 2>/dev/null)
+COUNT=$(printf '%s' "$PROFILES" | python3 -c 'import json,sys
+try:
+    print(len(json.load(sys.stdin)))
+except Exception:
+    print(0)' 2>/dev/null)
+if [ "${COUNT:-0}" -gt 0 ]; then
+	ok "$COUNT profile(s) already present"
+	printf '%s' "$PROFILES" | python3 -c '
+import json,sys
+for row in json.load(sys.stdin):
+    n = len(row.get("models") or [])
+    key = "key present" if row.get("key_present") else "NO KEY"
+    print(f"        {row[\"name\"]:<14} {key:<12} {n} model(s)  {row.get(\"base_url\") or \"\"}")
+' 2>/dev/null
+	if [ "$CHECK_ONLY" = "1" ]; then
+		say ""
+		say "Already configured."
+		exit 0
+	fi
+	say ""
+	say "Creating another profile will not remove those. Ctrl-C to stop, Enter to continue."
+	read -r _ || true
+else
+	info "none yet — the setup page will create the first one"
+	if [ "$CHECK_ONLY" = "1" ]; then
+		say ""
+		say "Nothing configured yet. Run without --check to set one up."
+		exit 1
+	fi
+fi
+
+# ---------------------------------------------------------------- 4. the page
+say ""
+say "4 · setup page"
+say "   A browser page opens on 127.0.0.1. Fill in the endpoint, test it, save."
+say "   The key is written by that page, mode 0600, and never printed here."
+say ""
+"$HERE/codex-setup" --home "$TARGET_HOME" "${BROWSER_ARG[@]}"
+SETUP_RC=$?
+
+if [ "$SETUP_RC" -ne 0 ]; then
+	say ""
+	bad "no profile was written (setup exited $SETUP_RC)"
+	exit 1
+fi
+
+# ---------------------------------------------------------------- 5. verify what exists now
+say ""
+say "5 · verification"
+AFTER=$("$HERE/codex-byok" --home "$TARGET_HOME" profile list --json 2>/dev/null)
+printf '%s' "$AFTER" | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+names = [r.get("name") for r in rows]
+bad = 0
+for row in rows:
+    name = row.get("name") or "?"
+    n = len(row.get("models") or [])
+    err = row.get("probe_error")
+    if err:
+        print("  FAIL  %s: %s" % (name, err))
+        bad += 1
+    elif n == 0:
+        print("  FAIL  %s: the endpoint served no models" % name)
+        bad += 1
+    else:
+        print("  PASS  %s: %d model(s) reachable" % (name, n))
+sys.exit(1 if bad else 0)
+' 2>/dev/null || {
+	bad "at least one profile is not usable — see above"
+	exit 1
+}
+
+say ""
+say "Ready. Run Codex with a profile:"
+printf '%s' "$AFTER" | python3 -c '
+import json, sys
+for row in json.load(sys.stdin):
+    print("  codex -p %s" % (row.get("name") or "?"))
+' 2>/dev/null
+say ""
+say "Model names must match what the endpoint reports;"
+say "  bin/codex-byok --home \"$TARGET_HOME\" pick     lists every one"
+exit 0
