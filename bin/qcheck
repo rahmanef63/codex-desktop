@@ -8,6 +8,21 @@
 #   qcheck shortcut   # only: does the Desktop still match this repo?
 #
 # Exit code is non-zero if a side that actually ran failed, or if it could not be proven.
+# Derive the probe dir from bin/codex-home instead of a hardcoded username.
+_codex_base() {
+	if [ -n "${_CODEX_BASE_CACHED:-}" ]; then printf '%s' "$_CODEX_BASE_CACHED"; return 0; fi
+	local out
+	out=$("$(dirname "$0")/codex-home" --json 2>/dev/null \
+		| python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("real","").replace("/.codex",""))' 2>/dev/null)
+	if [ -z "$out" ]; then
+		echo "cannot resolve the Codex home base; set QCHECK_DIR explicitly" >&2
+		return 1
+	fi
+	_CODEX_BASE_CACHED="$out"
+	printf '%s' "$out"
+}
+
+
 set -uo pipefail
 WHICH="${1:-both}"
 [ $# -gt 0 ] && shift
@@ -73,7 +88,7 @@ if [ "$run_codex" -eq 1 ]; then
 	# The probe dir is Windows-side on purpose: the exe reads it as a Windows path. Override
 	# WORKDIR/QCHECK_DIR on any other layout. `mkdir -p` on a missing /mnt/c just succeeds
 	# silently, which would turn a measurement into a no-op PASS.
-	QCHECK_DIR="${QCHECK_DIR:-/mnt/c/Users/rahma/Documents/probe}"
+	QCHECK_DIR="${QCHECK_DIR:-$(_codex_base)/Documents/probe}"
 	QCHECK_WIN="${QCHECK_WIN:-C:\\Users\\rahma\\Documents\\probe}"
 	if ! mkdir -p "$QCHECK_DIR" 2>/dev/null; then
 		printf '  FAIL  cannot create %s — set QCHECK_DIR\n' "$QCHECK_DIR" >&2
