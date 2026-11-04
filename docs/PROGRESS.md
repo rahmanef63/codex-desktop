@@ -722,3 +722,82 @@ proses list tak terbaca, atau snapshot milik `USERPROFILE_WSL` lain → FAIL + e
   pakai garis miring di belakang, jadi sibling `.codex-backup` tidak ikut diblokir.
   Sisa batas yang jujur: guard membandingkan path, bukan inode — hardlink ke dalam home tak
   terdeteksi, dan itu memang di luar cakupan skrip sekecil ini.
+
+## 9. `tests/shortcut-contract.sh` — "shortcut-nya sink dengan repo?" jadi perintah (2026-11-04)
+
+Empat shortcut Desktop rusak dengan cara yang persis diperingatkan CONTRACT.md, dan tak ada
+satu pun yang ketahuan karena tak ada yang memeriksanya. Yang terjadi:
+
+| shortcut | rusak karena |
+| --- | --- |
+| `Codex.lnk` | `-File` menunjuk `C:\Users\rahma\Desktop\codex-launch.ps1` — salinan, bukan repo |
+| `Codex Clone.lnk` | idem, plus ikon ke MSIX `26.1027.3384.0` yang sudah hilang |
+| `Codex Real (repo).lnk` | skrip benar, ikon tetap di `26.1027.3384.0` |
+| `Codex Clone (repo).lnk` | idem |
+
+Store menaikkan app ke `26.1029.7803.0`; folder `OpenAI.Codex_<versi>_` ikut pindah, dan setiap
+path yang menyebut versi ikut busuk. Ikon jadi halaman putih generik, bukan crash — karena itu
+lama tak ketahuan.
+
+Skrip membaca format `.lnk` langsung (Python, `struct`), bukan lewat `WScript.Shell`, supaya bisa
+jalan di WSL/Linux/macOS. Hanya pertanyaan "file Windows ini ada?" yang butuh `powershell.exe`.
+
+### Aturannya, dan alasan masing-masing
+
+| # | aturan | gagal bila | kenapa ada |
+| --- | --- | --- | --- |
+| R1 | target ada dan memang `powershell.exe` sistem | target hilang, atau salinan di bawah `C:\Users\` | salinan = interpreter lain dari yang diuji repo; target hilang = tak ada yang jalan |
+| R2 | `-File` menunjuk `scripts/codex-launch.ps1` **di repo ini** | file di Desktop, di luar git, atau byte-nya beda dari `$REPO/scripts/codex-launch.ps1` | perbaikan masuk git, shortcut tetap menjalankan file lama — kegagalan paling senyap dari empat ini |
+| R3 | file `IconLocation` ada sekarang | tak ada | gejala visual dari R4, bukan kosmetik: ikon putih generik |
+| R4 | tak ada path ber-`OpenAI.Codex_<versi>_` | ada di target/args/icon/workdir | versi MSIX pindah tiap update Store; path ber-versi busuk sendiri |
+| R5 | tepat satu `-Mode`, isinya `real` atau `clone` | tak ada, dobel, atau nilai lain | launcher default ke `real`; shortcut clone yang salah ketik membuka akun asli tanpa tanda |
+| R6 | tak ada dua shortcut dengan skrip+mode sama | ada | satu di antaranya tak terawat, dan mana yang diklik cuma keberuntungan |
+
+Worktree lain dari repo yang sama **lolos** R2 (dibandingkan lewat `--git-common-dir`), tapi
+byte-nya tetap harus sama dengan `$REPO/scripts/codex-launch.ps1` — path benar + isi basi tetap
+FAIL. Itu kasus yang paling mungkin terjadi dengan beberapa agent di branch berbeda.
+
+### Antarmuka
+
+```sh
+tests/shortcut-contract.sh                    # Desktop nyata
+tests/shortcut-contract.sh --dir <path>       # direktori fixtures
+tests/shortcut-contract.sh --repo <path>      # pin checkout yang diharapkan
+tests/shortcut-contract.sh --selftest         # buktikan tiap aturan masih bisa gagal
+bin/qcheck shortcut                           # satu perintah, satu verdict
+```
+
+Exit: `0` semua lolos, `1` ada FAIL, `2` tak ada FAIL tapi ada yang tak bisa dibuktikan.
+Yang tak bisa dibuktikan dicetak `UNPROVEN` — **tidak pernah** `PASS`. Dua jalan ke sana:
+tak ada `powershell.exe` di host, atau folder induk path itu tak bisa dibaca (WindowsApps
+ACL-locked), sehingga "tidak ada" bukan fakta.
+
+### Fixtures, dan buktinya
+
+`--selftest` menulis `.lnk` asli byte per byte (bukan stub), semua di bawah `$TMPDIR`, dengan
+path Windows berupa UNC `\\wsl.localhost\Ubuntu\...` ke tree sementara itu — jadi tak butuh
+Windows dan tak menyentuh Desktop. `SHORTCUT_NO_WINDOWS=1` memaksa jalur posix.
+
+| fixture | yang dilanggar | hasil |
+| --- | --- | --- |
+| `good` (kontrol) | — | lolos bersih, 0 FAIL 0 UNPROVEN |
+| `icon-missing` | R3 | FAIL `R3 icon file does not exist` |
+| `msix-pinned` | R4 | FAIL `R4 version-pinned MSIX path` |
+| `desktop-copy` | R2 | FAIL `R2 runs a Desktop copy` |
+| `duplicate` | R6 | FAIL `R6 duplicate shortcuts for mode` |
+| `no-mode` | R5 | FAIL `R5 no -Mode argument` |
+| `drift` | R2 byte | FAIL `R2 launcher drift` (dua worktree satu repo, isi beda) |
+
+`--selftest`: **7 passed, 0 failed**.
+
+### Batas yang dinyatakan
+
+- Yang diperiksa adalah isi `.lnk`, bukan apa yang terjadi saat diklik. Argumen `-Profile`,
+  `-Model`, `-RealHome` sengaja tidak divalidasi: launcher yang menolaknya, dan menebak di sini
+  akan jadi aturan kedua yang bisa salah.
+- R3 menerima ikon yang menunjuk target itu sendiri (`IconLocation == TargetPath`) tanpa cek
+  keberadaan terpisah — R1 sudah membuktikan file itu ada. Urutannya karena itu R1 sebelum R3.
+- Folder `WindowsApps` tak bisa dibaca dari WSL. Tanpa `powershell.exe`, setiap path MSIX jadi
+  `UNPROVEN`; itu disengaja, karena "tidak terlihat" bukan "tidak ada".
+- Shortcut yang bukan milik repo dilewati: hanya yang punya `codex-launch` di argumen atau
+  berawalan `Codex` yang diperiksa.
