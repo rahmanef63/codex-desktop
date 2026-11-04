@@ -20,6 +20,13 @@ extraResources:
     to: bin/codex-byok
   - from: ../bin/codex-version-drift
     to: bin/codex-version-drift
+  # `codex-home` is the CLI the main process asks which home to read, and `codex_home.py`
+  # is the single resolver both Python scripts import. They are resources, not sources:
+  # the app executes them, so they must stay outside the asar next to their siblings.
+  - from: ../bin/codex-home
+    to: bin/codex-home
+  - from: ../bin/codex_home.py
+    to: bin/codex_home.py
 
 asar: true
 

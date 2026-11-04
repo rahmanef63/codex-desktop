@@ -26,6 +26,9 @@ PROGRESS.local.md
 # Dependencies and Electron build output — reproducible, never committed
 node_modules/
 app/dist/
+# CPython bytecode from the shared resolver (bin/codex_home.py) is regenerated on import
+__pycache__/
+*.pyc
 
 # Machine-local artifacts
 *.log

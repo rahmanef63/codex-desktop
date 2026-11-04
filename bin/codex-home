@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Print the Codex home this environment means. One answer, for every caller.
+
+This is a thin CLI over `bin/codex_home.py`, the only place the rules are written down.
+Node shells out to it because Node cannot import Python; nothing is duplicated by doing
+so, and `app/tests/home-agreement.mjs` proves the two agree on hostile environments.
+
+Usage:
+  codex-home                 # the clone home (the one our tooling writes)
+  codex-home --real          # the ChatGPT-side home beside it
+  codex-home --json          # both, plus how the decision was reached
+
+Exit: 0 a home was named, 2 refused (the reason is on stderr and in --json).
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import codex_home  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--json", action="store_true", help="machine-readable, including refusals")
+    ap.add_argument("--real", action="store_true", help="print the ChatGPT-side home instead")
+    args = ap.parse_args()
+
+    result = codex_home.resolve()
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["ok"] else 2
+
+    if not result["ok"]:
+        print(result["message"], file=sys.stderr)
+        return 2
+
+    chosen = result["real"] if args.real else result["clone"]
+    if not chosen:
+        print("no ChatGPT-side home can be named here; set CODEX_HOME", file=sys.stderr)
+        return 2
+    print(chosen)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
