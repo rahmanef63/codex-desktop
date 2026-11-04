@@ -8,7 +8,8 @@ real problem that took time to find.
 1. **The clone home is standalone.** No junction, symlink or reparse point may point *out of*
    `~/.codex-clone`. The app legitimately creates one internal link
    (`plugins/cache/openai-bundled/chrome/latest` → its own versioned directory); that one is fine
-   because it points inside.
+   because it points inside. `bin/isolation-check verify` enforces this on every run: a link that
+   resolves outside the clone home, or one whose target cannot be resolved, is a FAIL.
 2. **Three variables, always together.** `CODEX_HOME`, `CODEX_ELECTRON_USER_DATA_PATH`, and
    `--user-data-dir=` on the command line. Any two of them without the third silently attaches to
    the running instance.
@@ -46,6 +47,8 @@ real problem that took time to find.
 13. **Do not touch the real account when testing the clone.** Record the pre-existing processes
     first — by name as well as by PID, because Chromium recycles renderers constantly and an
     exact-PID comparison reports a healthy app as killed — and verify every process name survives.
+    `bin/isolation-check` is the executable form of this rule and runs on WSL, Linux and macOS;
+    `tests/isolation-check.sh` proves it can still fail.
 
 ## Known traps
 

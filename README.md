@@ -27,7 +27,8 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `bin/codex-caps-quicktest` | Prints the capability matrix and probes it. |
 | `bin/codex-clone-quicktest` | Gates the sibling web repo: lint, types, tests, build, boot. |
 | `bin/qcheck` | Runs both quick tests and prints one verdict. |
-| `bin/isolation-check` | `snapshot` before a probe, `verify` after: proves the real account's sessions, config, auth and processes were untouched. Enforces CONTRACT §13. |
+| `bin/isolation-check` | `snapshot` before a probe, `verify` after: proves the real account's sessions, config, auth, links and processes were untouched. Enforces CONTRACT §13. Runs on WSL, Linux and macOS from one script. |
+| `tests/isolation-check.sh` | Drives the platform layer against fake homes in `/tmp`: clean tree, escaping symlink, leaked session, config byte change, missing home. No Windows needed. |
 | `scripts/capture_proxy.py` | Records the exact request the app sends to a gateway. |
 | `scripts/mcp_echo.py` | Harmless MCP server used to prove MCP survives the gateway path. |
 | `bin/codex-version-drift` | Records a fingerprint of everything our tooling depends on and reports when an app update moves it. Answers "did the app change under us". |
@@ -117,6 +118,7 @@ DEFAULT_MODEL=cx/gpt-6.1-sol NINE_ROUTER_KEY=sk-... bin/codex-9router-catalog
 bin/codex-real-quicktest      # chat + exec + MCP, ChatGPT vs gateway
 bin/codex-caps-quicktest      # capability matrix, writes real files and reads them back
 bin/codex-caps-quicktest --list   # matrix only, runs nothing
+tests/isolation-check.sh      # isolation-check's platform layer, fake homes, no Windows
 ```
 
 Probes read the disk, never the model's claim about itself. A probe once reported `apply_patch`
@@ -126,6 +128,9 @@ as PASS while the file still said `OLD`; every assertion since then has been a f
 
 - Windows host with Codex Desktop installed (MSIX).
 - PowerShell 7 or Windows PowerShell 5.1.
+- `bin/isolation-check` and `tests/isolation-check.sh` also run on Linux and macOS; they need
+  `bash`, `awk`, `find` and one of `md5sum` / `md5` / `shasum`. On macOS pass `CODEX_REAL_HOME`,
+  `CODEX_CLONE_HOME` and `CODEX_PROBE_HOME` — see below.
 - Node **24.22.2** for the reverse-engineering helper scripts; older versions fail on syntax the
   bundled code uses.
 - Python 3.12 for `scripts/*.py`.
