@@ -12,30 +12,15 @@
 set -uo pipefail
 
 # The app stages its CLI under a content-addressed directory that changes on every
-# update, so a pinned hash path is a guaranteed 404 after the next Store push. Resolve
-# the newest one instead; CODEX_EXE still wins when set explicitly.
-find_codex_exe() {
-	local base="${LOCALAPPDATA:-/mnt/c/Users/rahma/AppData/Local}/OpenAI/Codex/bin"
-	[ -d "$base" ] || return 1
-	local found
-	found=$(find "$base" -maxdepth 2 -name 'codex.exe' -type f -printf '%T@ %p\n' 2>/dev/null |
-		sort -rn | head -1 | cut -d' ' -f2-)
-	[ -n "$found" ] || return 1
-	# PowerShell cannot execute a WSL path. Translate /mnt/c/x -> C:\x before handing it over,
-	# and only when the result really is a Windows path.
-	case "$found" in
-	/mnt/[a-z]/*)
-		local drive rest
-		drive=$(printf '%s' "$found" | cut -c6 | tr 'a-z' 'A-Z')
-		# cut from the character AFTER the drive letter: the leading "/" becomes "\", so no
-		# separator is added by hand here.
-		rest=$(printf '%s' "$found" | cut -c7- | tr '/' '\\')
-		printf '%s:%s\n' "$drive" "$rest"
-		;;
-	*) printf '%s\n' "$found" ;;
-	esac
-}
-CODEX_EXE="${CODEX_EXE:-$(find_codex_exe)}"
+# update, so a pinned hash path is a guaranteed 404 after the next Store push. The resolver
+# lives in bin/codex-exe so both probes share one rule; CODEX_EXE still wins when set.
+# These scripts are normally reached through a ~/.local/bin symlink, so $0 is the link and
+# dirname "$0" points at the wrong directory: on 2026-11-05 that made the caps probe read an
+# empty CODEX_EXE and fail all 22 measurements while the same code passed from the repo.
+# readlink -f resolves the link before any sibling path is built.
+SELF_DIR=$(cd -P -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+
+CODEX_EXE="${CODEX_EXE:-$("$SELF_DIR/codex-exe")}"
 if [ -z "${CODEX_EXE:-}" ]; then
 	printf 'cannot find codex.exe under %%LOCALAPPDATA%%\\OpenAI\\Codex\\bin\n' >&2
 	printf 'set CODEX_EXE to the real path and re-run\n' >&2

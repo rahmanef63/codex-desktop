@@ -12,7 +12,7 @@
 _codex_base() {
 	if [ -n "${_CODEX_BASE_CACHED:-}" ]; then printf '%s' "$_CODEX_BASE_CACHED"; return 0; fi
 	local out
-	out=$("$(dirname "$0")/codex-home" --json 2>/dev/null \
+	out=$("$SELF_DIR/codex-home" --json 2>/dev/null \
 		| python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("real","").replace("/.codex",""))' 2>/dev/null)
 	if [ -z "$out" ]; then
 		echo "cannot resolve the Codex home base; set QCHECK_DIR explicitly" >&2
@@ -22,6 +22,12 @@ _codex_base() {
 	printf '%s' "$out"
 }
 
+
+# These scripts are normally reached through a ~/.local/bin symlink, so $0 is the link and
+# dirname "$0" points at the wrong directory: on 2026-11-05 that made the caps probe read an
+# empty CODEX_EXE and fail all 22 measurements while the same code passed from the repo.
+# readlink -f resolves the link before any sibling path is built.
+SELF_DIR=$(cd -P -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 
 set -uo pipefail
 WHICH="${1:-both}"
@@ -33,7 +39,7 @@ WHICH="${1:-both}"
 #
 # `uname -s` rather than `$OSTYPE`: uname exists on macOS, Linux and in WSL (where it says
 # "Linux", which is correct — this is the WSL side and the Windows probes are reachable).
-ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(cd -- "$SELF_DIR/.." && pwd)
 case "$(uname -s 2>/dev/null)" in
 Darwin)
 	# The shortcut contract needs no Windows; the other two do.

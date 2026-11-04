@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Print the Windows path of the newest staged codex.exe.
+#
+# The app stages its CLI under a content-addressed directory (`bin/<hash>/codex.exe`) that
+# changes on every Store update, so any literal hash in a probe is a 404 waiting to happen --
+# this is what broke `codex-caps-quicktest` on 2026-11-05, after 22cfb1d302613eae disappeared.
+# One resolver, two probes (CONTRACT 5: a second copy of a rule is the defect).
+#
+# Prints a Windows path because PowerShell cannot execute a WSL one.
+# Exit: 0 path printed, 2 nothing found or LOCALAPPDATA missing.
+set -uo pipefail
+
+base="${LOCALAPPDATA:-/mnt/c/Users/rahma/AppData/Local}/OpenAI/Codex/bin"
+[ -d "$base" ] || {
+	printf 'codex-exe: no staged CLI directory at %s\n' "$base" >&2
+	exit 2
+}
+
+found=$(find "$base" -maxdepth 2 -name 'codex.exe' -type f -printf '%T@ %p\n' 2>/dev/null |
+	sort -rn | head -1 | cut -d' ' -f2-)
+[ -n "$found" ] || {
+	printf 'codex-exe: no codex.exe under %s\n' "$base" >&2
+	exit 2
+}
+
+case "$found" in
+/mnt/[a-z]/*)
+	drive=$(printf '%s' "$found" | cut -c6 | tr 'a-z' 'A-Z')
+	# cut from the character AFTER the drive letter: its leading "/" becomes "\", so no
+	# separator is added by hand here.
+	rest=$(printf '%s' "$found" | cut -c7- | tr '/' '\\')
+	printf '%s:%s\n' "$drive" "$rest"
+	;;
+*) printf '%s\n' "$found" ;;
+esac
