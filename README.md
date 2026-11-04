@@ -99,7 +99,17 @@ powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1 -Mode clone
 powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1 -Mode real
 ```
 
-Create desktop shortcuts that pass `-Mode real` and `-Mode clone`.
+Create desktop shortcuts that pass `-Mode real` and `-Mode clone`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1
+bin/shortcut-check      # prove they still point at this checkout
+```
+
+Two shortcuts, one per mode: they run *this* checkout's launcher over `\\wsl.localhost`, and
+their icon is resolved from the installed MSIX package with `Get-AppxPackage` every time they
+are written. Never pin an icon to `WindowsApps\OpenAI.Codex_<version>_...` by hand: the Store
+replaces that folder on every update and the icon silently goes generic.
 
 The profile contains a bearer token for your gateway. **It is not in this repository.**
 `.env.example` lists what a profile needs; copy your own values into
