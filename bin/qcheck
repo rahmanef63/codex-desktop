@@ -5,8 +5,9 @@
 #   qcheck clone      # repo only
 #   qcheck codex      # Codex only
 #   qcheck clone --no-build
+#   qcheck shortcut   # only: does the Desktop still match this repo?
 #
-# Exit code is non-zero if a side that actually ran failed.
+# Exit code is non-zero if a side that actually ran failed, or if it could not be proven.
 set -uo pipefail
 WHICH="${1:-both}"
 [ $# -gt 0 ] && shift
@@ -17,28 +18,36 @@ WHICH="${1:-both}"
 #
 # `uname -s` rather than `$OSTYPE`: uname exists on macOS, Linux and in WSL (where it says
 # "Linux", which is correct — this is the WSL side and the Windows probes are reachable).
+ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 case "$(uname -s 2>/dev/null)" in
 Darwin)
-	printf 'qcheck: this runs the Windows probes; on macOS there is no MSIX to measure.\n' >&2
-	printf '        What does work on macOS: bin/codex-byok, bin/codex-version-drift.\n' >&2
-	printf '        See docs/MACOS.md.\n' >&2
-	exit 2
+	# The shortcut contract needs no Windows; the other two do.
+	if [ "${1:-both}" != shortcut ]; then
+		printf 'qcheck: this runs the Windows probes; on macOS there is no MSIX to measure.\n' >&2
+		printf '        What does work on macOS: bin/codex-byok, bin/codex-version-drift,\n' >&2
+		printf '        tests/shortcut-contract.sh. See docs/MACOS.md.\n' >&2
+		exit 2
+	fi
 	;;
 esac
 
 run_clone=1
 run_codex=1
+run_shortcut=1
 case "$WHICH" in
-clone) run_codex=0 ;;
-codex) run_clone=0 ;;
+clone) run_codex=0; run_shortcut=0 ;;
+codex) run_clone=0; run_shortcut=0 ;;
+shortcut) run_clone=0; run_codex=0 ;;
 esac
 
 clone_rc=0
 codex_rc=0
 caps_rc=0
+shortcut_rc=0
 clone_state="skipped"
 codex_state="skipped"
 caps_state="skipped"
+shortcut_state="skipped"
 clone_skips=0
 SKIP_FILE="${TMPDIR:-/tmp}/codex-clone-quicktest.skips"
 
@@ -82,9 +91,25 @@ if [ "$run_codex" -eq 1 ]; then
 	fi
 fi
 
+if [ "$run_shortcut" -eq 1 ]; then
+	printf '\n########## desktop shortcuts ##########\n'
+	# Exit 2 means nothing failed but something could not be proven (UNPROVEN). That is not a
+	# pass, so it must not read as one here either.
+	out=$(bash "$ROOT/tests/shortcut-contract.sh" 2>&1)
+	src=$?
+	printf '%s\n' "$out"
+	case "$src" in
+	0) shortcut_state="ok" ;;
+	2) shortcut_state="UNPROVEN"; shortcut_rc=1 ;;
+	*) shortcut_state="FAILED"; shortcut_rc=1 ;;
+	esac
+fi
+
 printf '\n########## verdict ##########\n'
 printf '  clone : %s\n' "$clone_state"
 printf '  codex : %s\n' "$codex_state"
 printf '  caps  : %s\n' "$caps_state"
+printf '  shortcut: %s\n' "$shortcut_state"
 
-[ "$clone_rc" -eq 0 ] && [ "$codex_rc" -eq 0 ] && [ "$caps_rc" -eq 0 ]
+[ "$clone_rc" -eq 0 ] && [ "$codex_rc" -eq 0 ] && [ "$caps_rc" -eq 0 ] &&
+	[ "$shortcut_rc" -eq 0 ]

@@ -29,6 +29,7 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `bin/qcheck` | Runs both quick tests and prints one verdict. |
 | `bin/isolation-check` | `snapshot` before a probe, `verify` after: proves the real account's sessions, config, auth, links and processes were untouched. Enforces CONTRACT §13. Runs on WSL, Linux and macOS from one script. |
 | `tests/isolation-check.sh` | Drives the platform layer against fake homes in `/tmp`: clean tree, escaping symlink, leaked session, config byte change, missing home. No Windows needed. |
+| `tests/shortcut-contract.sh` | Proves the Desktop shortcuts still launch *this* repo: target, script path and bytes, icon existence, no version-pinned MSIX path, one valid `-Mode`, no duplicates. `--dir` for fixtures, `--selftest` to prove each rule can fail. |
 | `scripts/capture_proxy.py` | Records the exact request the app sends to a gateway. |
 | `scripts/mcp_echo.py` | Harmless MCP server used to prove MCP survives the gateway path. |
 | `bin/codex-version-drift` | Records a fingerprint of everything our tooling depends on and reports when an app update moves it. Answers "did the app change under us". |
@@ -99,7 +100,8 @@ powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1 -Mode clone
 powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1 -Mode real
 ```
 
-Create desktop shortcuts that pass `-Mode real` and `-Mode clone`.
+Create desktop shortcuts that pass `-Mode real` and `-Mode clone`. `tests/shortcut-contract.sh`
+tells you whether they still point at this repo instead of asserting it.
 
 The profile contains a bearer token for your gateway. **It is not in this repository.**
 `.env.example` lists what a profile needs; copy your own values into
@@ -120,7 +122,15 @@ bin/codex-real-quicktest      # chat + exec + MCP, ChatGPT vs gateway
 bin/codex-caps-quicktest      # capability matrix, writes real files and reads them back
 bin/codex-caps-quicktest --list   # matrix only, runs nothing
 tests/isolation-check.sh      # isolation-check's platform layer, fake homes, no Windows
+tests/shortcut-contract.sh    # does the Desktop still launch this repo? (see below)
+bin/qcheck shortcut           # same thing, with a one-line verdict
 ```
+
+`tests/shortcut-contract.sh` reads the `.lnk` files directly, so it needs no Windows and no
+PowerShell; only "does this Windows path exist" shells out. It exits 0 when every shortcut
+passes, 1 on any violation, and 2 when nothing failed but something could not be proven —
+printed as `UNPROVEN`, never as `PASS`. Use `--dir <path>` to check a folder of fixtures and
+`--selftest` to prove each rule can still fail.
 
 Probes read the disk, never the model's claim about itself. A probe once reported `apply_patch`
 as PASS while the file still said `OLD`; every assertion since then has been a file read.
@@ -132,6 +142,7 @@ as PASS while the file still said `OLD`; every assertion since then has been a f
 - `bin/isolation-check` and `tests/isolation-check.sh` also run on Linux and macOS; they need
   `bash`, `awk`, `find` and one of `md5sum` / `md5` / `shasum`. On macOS pass `CODEX_REAL_HOME`,
   `CODEX_CLONE_HOME` and `CODEX_PROBE_HOME` — see below.
+- `tests/shortcut-contract.sh` needs `bash` and `python3` (it parses `.lnk` itself).
 - Node **24.22.2** for the reverse-engineering helper scripts; older versions fail on syntax the
   bundled code uses.
 - Python 3.12 for `scripts/*.py`.
