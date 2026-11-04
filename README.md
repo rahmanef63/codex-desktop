@@ -33,6 +33,8 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `scripts/mcp_echo.py` | Harmless MCP server used to prove MCP survives the gateway path. |
 | `bin/codex-version-drift` | Records a fingerprint of everything our tooling depends on and reports when an app update moves it. Answers "did the app change under us". |
 | `bin/codex-byok` | BYOK profiles: list, add, pick a model, apply. Probes each profile's gateway and reports what it can really serve. |
+| `bin/desktop-audit` | Every `.lnk` on both Windows desktops, with its icon, target and launch script checked for existence. Exits 1 if any of them rotted. Answers "is my desktop healthy". |
+| `docs/DESKTOP.md` | What the desktop shortcuts actually are, why there were four Codex entries, which to keep, and how to make the icon survive a Store update. |
 | `app/` | One Electron window over those two. Unsigned on purpose. Not a Codex clone. |
 | `docs/BYOK-AND-UPDATES.md` | Why nothing here is signed, how profiles work, and how to stay current through a Store update. |
 | `docs/PROGRESS.md` | Working notes: what is proven, what is not, and every trap that cost time. |
