@@ -4,6 +4,11 @@
 # This repository drives a gateway that authenticates with a bearer token, and the token also
 # appears in ~/.codex profiles and shell history. A single accidental `git add` would publish it
 # permanently. Run this before every commit; `git config core.hooksPath` can wire it up.
+#
+# Portable across GNU (Linux/WSL) and BSD (macOS) userland. The two differences that bite:
+#   * `xargs -0 -r` — BSD xargs has no `-r`. Replaced with the POSIX trick `xargs ... || true`
+#     plus an empty-list guard, so an empty commit stage does not run grep on nothing.
+#   * `xargs -0` itself is fine on both; only `-r` is GNU.
 set -uo pipefail
 
 PATTERNS=(
@@ -21,10 +26,12 @@ files=$(git diff --cached --name-only --diff-filter=ACM)
 failed=0
 for pattern in "${PATTERNS[@]}"; do
 	# -I skips binaries; -n prints the line so the file can be fixed precisely.
-	hits=$(echo "$files" | tr '\n' '\0' | xargs -0 -r grep -InE "$pattern" 2>/dev/null || true)
+	# `printf '%s\n'` guarantees the trailing newline that `tr` turns into the NUL terminator
+	# BSD `xargs -0` needs; git's list has none of its own.
+	hits=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 grep -InE "$pattern" 2>/dev/null || true)
 	if [ -n "$hits" ]; then
-		echo "refusing to commit: matched /$pattern/" >&2
-		echo "$hits" | sed 's/^/  /' | head -20 >&2
+		printf 'refusing to commit: matched /%s/\n' "$pattern" >&2
+		printf '%s\n' "$hits" | sed 's/^/  /' | head -20 >&2
 		failed=1
 	fi
 done

@@ -6,7 +6,16 @@
 #
 # Exits non-zero on the first failed check so it can gate a commit.
 set -uo pipefail
-cd "${REPO:-/home/rahman/projects/lara/codex-clone-placeholder}" || exit 1
+# Repo override via REPO. The default is Rahman's checkout; anywhere else it will simply not
+# exist, so say that instead of exiting 1 with no output — on macOS this is the first thing a
+# reader hits, and silence reads like a bug in the script.
+REPO_DIR="${REPO:-/home/rahman/projects/lara/codex-clone-placeholder}"
+if [ ! -d "$REPO_DIR" ]; then
+	printf 'codex-clone-quicktest: no repo at %s\n' "$REPO_DIR" >&2
+	printf '  set REPO=/path/to/codex-clone-placeholder\n' >&2
+	exit 1
+fi
+cd "$REPO_DIR" || exit 1
 
 PORT="${PORT:-4198}"
 BASE="http://127.0.0.1:${PORT}"

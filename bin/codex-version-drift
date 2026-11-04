@@ -21,6 +21,11 @@ Usage:
   codex-version-drift --help
 
 Exit: 0 nothing drifted, 1 drift detected, 2 could not measure.
+
+Platform: the MSIX probe only means anything on Windows. Off Windows it reports
+"not measurable" — it does not fail, and it does not silently claim the app is
+unchanged. Everything else (config keys, catalog shape) is plain file reading and
+works anywhere, including macOS.
 """
 import argparse
 import hashlib
@@ -31,6 +36,21 @@ import subprocess
 import sys
 
 STATE_NAME = "version-drift.json"
+
+# The app-identity probe needs PowerShell. That is not the same question as "is the host
+# Windows": under WSL the HOST is Linux while the app lives on the Windows side, and
+# powershell.exe is reachable. So the gate is "can we reach PowerShell", discovered once,
+# rather than a platform string that answers a different question.
+def _powershell_reachable():
+    try:
+        out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", "exit 0"],
+                             capture_output=True, text=True, timeout=15)
+        return out.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+IS_WINDOWS_APP = sys.platform == "win32" or _powershell_reachable()
 
 # Every key our launcher re-asserts, and therefore every key whose disappearance or
 # rename would break a clone launch. Derived from CONTRACT.md §6 and §8, not invented.
@@ -43,9 +63,64 @@ LOAD_BEARING = [
 ]
 
 
-def state_dir():
-    base = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
-    return os.path.join(base, "version-drift")
+def default_home():
+    """The clone home to measure.
+
+    CODEX_HOME wins. Under WSL the Windows clone home is the right answer, because the app
+    it describes lives on the Windows side. Everywhere else it is ~/.codex-clone.
+
+    The Windows path is DERIVED, never hardcoded: a username baked into a default is wrong
+    on every machine but one. `wslpath` is the authority when it is available; the
+    conventional /mnt/c/Users/<user> is the fallback.
+
+    The WSL test is an environment read, not an `os.path.isdir` sniff: a default that
+    changes based on what happens to exist on disk is not a default, and an earlier isdir
+    version of this function silently wrote into the Windows home from a macOS-portability
+    test run.
+    """
+    env = os.environ.get("CODEX_HOME")
+    if env:
+        return env
+    if os.environ.get("WSL_DISTRO_NAME"):
+        # USERPROFILE is frequently unset inside WSL, so translating an empty string would
+        # silently produce an empty base and a RELATIVE home — worse than a wrong one,
+        # because it writes ./ .codex-clone into whatever the cwd happens to be.
+        profile = os.environ.get("USERPROFILE") or ""
+        # USERPROFILE is often unset inside WSL. Asking Windows directly is authoritative;
+        # guessing from $USER is not, because the Linux account and the Windows account
+        # frequently differ (here: `rahman` vs `rahma`) and the guess lands on a directory
+        # that may not exist or may not be ours.
+        if not profile:
+            try:
+                out = subprocess.run(["cmd.exe", "/c", "echo %USERPROFILE%"],
+                                     capture_output=True, text=True, timeout=15)
+                candidate = out.stdout.strip().replace("\r", "").replace("\n", "")
+                if out.returncode == 0 and candidate and candidate.upper() != "%USERPROFILE%":
+                    profile = candidate
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if profile:
+            try:
+                out = subprocess.run(["wslpath", "-u", profile],
+                                     capture_output=True, text=True, timeout=10)
+                base = out.stdout.strip()
+                if out.returncode == 0 and base and os.path.isabs(base):
+                    return os.path.join(base, ".codex-clone")
+            except (OSError, subprocess.SubprocessError):
+                pass
+    home = os.path.join(os.path.expanduser("~"), ".codex-clone")
+    if not os.path.isabs(home):
+        raise SystemExit("refusing a relative default home; set CODEX_HOME")
+    return home
+
+
+def state_dir(home):
+    """Fingerprint lives inside the home it describes.
+
+    Not in a global location: a macOS user's ~/.codex is the Codex CLI's real home, and
+    writing drift state into it would be pollution of a directory this tool does not own.
+    """
+    return os.path.join(home, "version-drift")
 
 
 def wsl_path(p):
@@ -90,7 +165,14 @@ def parse_toml_keys(text):
 
 
 def msix_identity():
-    """Read the installed MSIX identity. Windows only; absent elsewhere is not an error."""
+    """Read the installed MSIX identity. Windows only.
+
+    Off Windows there is no MSIX to read, so returning None is a *correct* answer, not a
+    failure. The distinction that must survive: None means "not measurable here", and the
+    caller reports it as such rather than as "unchanged".
+    """
+    if not IS_WINDOWS_APP:
+        return None
     try:
         out = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command",
@@ -151,8 +233,8 @@ def fingerprint(home):
     return facts
 
 
-def load_previous():
-    p = os.path.join(state_dir(), STATE_NAME)
+def load_previous(home):
+    p = os.path.join(state_dir(home), STATE_NAME)
     raw = read_text(p)
     if not raw:
         return None
@@ -163,7 +245,7 @@ def load_previous():
 
 
 def save_state(facts):
-    d = state_dir()
+    d = state_dir(facts["home"])
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, STATE_NAME), "w", encoding="utf-8") as fh:
         json.dump(facts, fh, indent=2, sort_keys=True)
@@ -215,8 +297,7 @@ def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("command", nargs="?", default="record", choices=["record", "check"])
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--home", default=os.environ.get("CODEX_HOME")
-                    or os.path.join(os.path.expanduser("~"), ".codex-clone"))
+    ap.add_argument("--home", default=default_home())
     args = ap.parse_args()
 
     now = fingerprint(args.home)
@@ -226,27 +307,40 @@ def main():
         if args.json:
             print(json.dumps(now, indent=2, sort_keys=True))
         else:
-            print(f"recorded {os.path.join(state_dir(), STATE_NAME)}")
+            print(f"recorded {os.path.join(state_dir(args.home), STATE_NAME)}")
             print(f"  config keys      {len(now['config_keys'])}")
             if now.get("catalog_models"):
                 print(f"  catalog models   {now['catalog_models']}")
             if now.get("msix"):
                 print(f"  app version      {now['msix'].get('Version')}")
+            else:
+                print("  app version      not measurable here (MSIX probe is Windows-only)")
         return 0
 
-    prev = load_previous()
+    prev = load_previous(args.home)
+
     if prev is None:
         print("no fingerprint recorded yet — run `codex-version-drift record`", file=sys.stderr)
         return 2
 
     problems = diff(prev, now)
     if args.json:
-        print(json.dumps({"problems": [{"id": a, "detail": b} for a, b in problems]}, indent=2))
+        print(json.dumps({
+            "problems": [{"id": a, "detail": b} for a, b in problems],
+            # Consumers (app/src/main.mjs) can tell "checked and clean" from "could not check
+            # the app version on this platform" instead of guessing from an empty problem list.
+            "msix_measurable": now.get("msix") is not None,
+        }, indent=2))
     else:
         if not problems:
             print("OK  nothing our tooling depends on has moved")
         for pid, detail in problems:
             print(f"  {pid}: {detail}")
+        # Said out loud, because "no problems" would otherwise be read as "everything was
+        # checked". The app-identity comparison did not happen on this platform.
+        if now.get("msix") is None:
+            print("  note: app version not measurable here (MSIX probe is Windows-only); "
+                  "config and catalog checks above did run", file=sys.stderr)
 
     return 1 if problems else 0
 
