@@ -1096,3 +1096,17 @@ yang lain. Yang ini yang membuat semua percobaan sesudahnya terasa "kurang effor
 `model_instructions_file` bukan tempat menaruh "beberapa aturan tambahan". Ia adalah
 pengganti prompt penuh. Untuk menambah aturan: `AGENTS.md`. Untuk mengganti agent sepenuhnya:
 baru `model_instructions_file`.
+
+## 16. Verifikasi akhir §13–§15, di klon, setelah semua perubahan
+
+| hal | nilai terbaca | bukti |
+| --- | --- | --- |
+| prompt Codex utuh | `base_instructions` **21.638** char | `session_meta` rollout klon terakhir |
+| provider | `nine_router` | idem |
+| model | `deepseek-v4.1-flash-free` | `turn_context` + `config.toml` |
+| effort | `high` | `turn_context` |
+| `AGENTS.md` terbaca | "max 3 sub-agents, wait_agent 600000, wsl.exe -d Ubuntu --cd ..." | jawaban tanpa tool |
+| `model_instructions_file` | tidak ada di kedua home | `grep` |
+| catalog | 99 model, trunc 40.000, verbosity medium, 3 `oc/*` disembunyikan | `nine-router-models.json` (asli & klon identik) |
+| suite | 8/8 (`run-tests`), 12 (`isolation`), 11 (`instruct`), 11 (`shortcut`) | dijalankan |
+| `qcheck codex` | 5 passed + 22 passed, 0 failed | dijalankan lewat symlink dari `/tmp` |
