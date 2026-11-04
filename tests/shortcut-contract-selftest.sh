@@ -6,6 +6,15 @@
 # the same absolute path on this host, so the run needs no Windows and touches no desktop.
 set -uo pipefail
 
+# This file is sourced by tests/shortcut-contract.sh --selftest, which supplies $WORK.
+# Run directly it would die on `$WORK: unbound variable`, which reads like a broken repo.
+# Say what it needs instead, and point at the command that works.
+if [ -z "${WORK:-}" ]; then
+	printf 'this selftest needs $WORK from its parent.\n' >&2
+	printf 'run instead:  tests/shortcut-contract.sh --selftest\n' >&2
+	exit 2
+fi
+
 FIX="$WORK/fixtures"
 FAKE="$WORK/fakec"          # a fake C: tree: powershell.exe and one real .ico live here
 DISTRO=Ubuntu

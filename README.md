@@ -23,7 +23,7 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `scripts/codex-launch.ps1` | The launcher. `-Mode real` or `-Mode clone`, and it re-asserts the two config values the app likes to rewrite. |
 | `scripts/mk-probe-image.ps1` | Generates the image-probe fixture: 1093×6000 px, ~1 MB, with a random 6-character marker drawn as pixels. Size is what makes the probe able to fail. |
 | `bin/codex-9router-catalog` | Regenerates the Codex model catalog from the gateway's live `/v1/models`. |
-| `bin/codex-real-quicktest` | Proves chat, exec and MCP against both providers. |
+| `bin/codex-real-quicktest` | Proves chat, exec and MCP against both providers. Resolves `codex.exe` from the newest staged CLI dir, so a Store update does not turn it into a 404. |
 | `bin/codex-caps-quicktest` | Prints the capability matrix and probes it. |
 | `bin/codex-clone-quicktest` | Gates the sibling web repo: lint, types, tests, build, boot. |
 | `bin/chrome-import-check` | Read-only: which Chrome profiles are importable *right now* and whether App-Bound Encryption is on. Answers "is it really the lock". |
@@ -37,10 +37,14 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `bin/codex-byok` | BYOK profiles: list, add, pick a model, apply. Probes each profile's gateway and reports what it can really serve. |
 | `bin/codex-onboard` | **Start here if you just cloned this.** Checks the app, resolves the home, then opens the local setup page. Never writes a credential itself. |
 | `bin/codex-setup` | The local setup page: OAuth gateway, API key, or custom endpoint. Tests the endpoint, refuses a model it does not serve, writes the profile 0600. |
+| `bin/codex-doctor` | One verdict for the whole checkout: app version, home, profiles, endpoint reachability, model actually served, catalog, writability, repo selftests. `--home` to inspect a fixture, `--fast` to skip the network. |
+| `bin/codex-instruct` | Custom instructions and deterministic hooks, using the surfaces the binary already honours: `model_instructions_file`, `$CODEX_HOME/hooks.json`. `determinism` reports what can and cannot be pinned. |
+| `tests/instruct-contract.sh` | Proves the instruction writer is safe: TOML escaping, `/mnt/<drive>` translation, other config bytes untouched, hooks append as valid JSON, and the determinism report never overclaims. |
 | `bin/desktop-audit` | Every `.lnk` on both Windows desktops, with its icon, target and launch script checked for existence. Exits 1 if any of them rotted. Answers "is my desktop healthy". |
 | `docs/DESKTOP.md` | What the desktop shortcuts actually are, why there were four Codex entries, which to keep, and how to make the icon survive a Store update. |
 | `app/` | One Electron window over those two. Unsigned on purpose. Not a Codex clone. |
 | `docs/BYOK-AND-UPDATES.md` | Why nothing here is signed, how profiles work, and how to stay current through a Store update. |
+| `docs/INSTRUCTIONS.md` | Custom instructions (`model_instructions_file`), project `AGENTS.md`, and lifecycle hooks — with the measured proof and an honest note on what determinism cannot cover. |
 | `docs/PROGRESS.md` | Working notes: what is proven, what is not, and every trap that cost time. |
 | `parity-evidence/capability-matrix.txt` | The measured capability matrix and the root cause behind each verdict. |
 | `docs/MACOS.md` | What runs on macOS, what refuses and why, and the unsigned-build/Gatekeeper consequence. |

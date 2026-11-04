@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""One command that answers "is this checkout actually working here?".
+
+Seven scripts in `bin/` each answer one question, and a new user has no way to know which
+to run first. This runs the cheap, side-effect-free checks in dependency order and prints
+one verdict. It never writes to a Codex home and never prints a credential.
+
+Order is the point: each check assumes the previous one passed.
+  app -> home -> profile -> endpoint -> catalog -> sandbox -> desktop
+
+Usage:
+  codex-doctor
+  codex-doctor --json
+  codex-doctor --fast        # skip the network probes (endpoint, catalog models)
+
+Exit: 0 everything that matters passed, 1 a check failed, 2 could not run at all.
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import codex_home  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+RESULTS = []
+
+
+def record(name, ok, detail, hint=None):
+    RESULTS.append({"check": name, "ok": ok, "detail": detail, "hint": hint})
+
+
+def run(argv, timeout=20):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, str(e)
+
+
+def check_node():
+    major = sys.version_info.major
+    if major >= 3:
+        record("runtime", True, "python %d.%d" % (sys.version_info.major, sys.version_info.minor))
+    else:
+        record("runtime", False, "python %d" % major, "this repo needs python3")
+
+
+def check_app():
+    """The MSIX identity, not a guessed install path."""
+    code, out = run(["powershell.exe", "-NoProfile", "-Command",
+                     "(Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1).Version"])
+    if code != 0:
+        record("app", None, "not measurable here (no PowerShell)", None)
+        return
+    version = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    if version and version[0].isdigit():
+        record("app", True, "OpenAI.Codex %s" % version)
+    else:
+        record("app", False, "OpenAI.Codex not installed", "install it from the Microsoft Store")
+
+
+def check_home():
+    res = codex_home.resolve()
+    if res.get("ok"):
+        record("home", True, res.get("real") or res.get("clone"),
+               "resolved by %s" % res.get("source"))
+    else:
+        record("home", False, res.get("reason") or "unresolved",
+               "set CODEX_HOME, or run on a host that has a Windows profile")
+
+
+def check_profiles(home):
+    try:
+        names = sorted(n[: -len(".config.toml")] for n in os.listdir(home)
+                       if n.endswith(".config.toml"))
+    except OSError as e:
+        record("profiles", False, "cannot list %s: %s" % (home, e))
+        return []
+    if not names:
+        record("profiles", False, "none", "run bin/codex-onboard")
+        return []
+    record("profiles", True, "%d: %s" % (len(names), ", ".join(names)))
+    return names
+
+
+def fetch_models(base_url, token, timeout=15):
+    import urllib.error
+    import urllib.request
+
+    url = base_url.rstrip("/") + "/models"
+    headers = {"Authorization": "Bearer " + (token or "none")}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.load(resp)
+        return [m.get("id") for m in data.get("data", []) if m.get("id")], None
+    except urllib.error.HTTPError as e:
+        return [], "HTTP %d %s" % (e.code, e.reason)
+    except Exception as e:  # noqa: BLE001 - any failure here is reported, never raised
+        return [], "%s: %s" % (type(e).__name__, e)
+
+
+def parse_profile(path):
+    """Read the three keys we depend on. A full TOML parser is not needed and not shipped."""
+    out = {}
+    section = ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s
+            continue
+        if "=" in s and not s.startswith("#"):
+            k, _, v = s.partition("=")
+            key = (section + "." if section else "") + k.strip()
+            out[key] = v.strip().strip('"')
+    return out
+
+
+def check_endpoint(home, names, fast):
+    """Pick the profile the app would actually use, then ask it what it serves.
+
+    `config.toml` usually has no `model_provider` at all: when the user launches with
+    `-p <name>`, the profile supplies it. So the search starts from the profile list and
+    treats a config.toml that names one as a tiebreaker, not a requirement.
+    """
+    cfg = parse_profile(os.path.join(home, "config.toml"))
+    cfg_pid = cfg.get("model_provider")
+    active = None
+    for n in names:
+        p = parse_profile(os.path.join(home, "%s.config.toml" % n))
+        if cfg_pid and p.get("model_provider") == cfg_pid:
+            active = (n, p)
+            break
+    if active is None:
+        active = (names[0], parse_profile(os.path.join(home, "%s.config.toml" % names[0])))
+    name, prof = active
+
+    pid = prof.get("model_provider") or cfg_pid
+    base = prof.get("model_providers.%s.base_url" % pid) if pid else None
+    if not base:
+        # Any provider table will do for a reachability check; naming the one we found
+        # avoids a silent "no endpoint" when the profile uses a different key spelling.
+        for k, v in prof.items():
+            if k.endswith(".base_url"):
+                base = v
+                pid = k.split(".")[1]
+                break
+    if not base:
+        record("endpoint", None, "no base_url in profile %s" % name)
+        return
+
+    # The profile's own model is what `-p <name>` runs. `config.toml` holds the ChatGPT-side
+    # default, which is a different provider and would be reported as "not served" here.
+    model = prof.get("model") or cfg.get("model")
+    if fast:
+        record("endpoint", None, "skipped (--fast): %s" % base)
+        return
+    # The token is read to authenticate, never printed.
+    token = prof.get("model_providers.%s.experimental_bearer_token" % pid) or ""
+    ids, err = fetch_models(base, token)
+    if err:
+        record("endpoint", False, "%s -> %s" % (base, err),
+               "start the gateway, or fix base_url in %s.config.toml" % name)
+        return
+    record("endpoint", True, "%s serves %d model(s)" % (base, len(ids)))
+    if model and ids and model not in ids:
+        record("model", False, "%s is not served" % model,
+               "bin/codex-byok --home %s pick" % home)
+    elif model:
+        record("model", True, model)
+
+
+def check_catalog(home):
+    path = os.path.join(home, "nine-router-models.json")
+    if not os.path.exists(path):
+        record("catalog", None, "absent (only needed by a gateway profile)")
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        record("catalog", False, "unreadable: %s" % e)
+        return
+    models = data.get("models") if isinstance(data, dict) else data
+    n = len(models) if isinstance(models, list) else 0
+    if n == 0:
+        record("catalog", False, "empty", "bin/codex-9router-catalog")
+    else:
+        record("catalog", True, "%d model entries" % n)
+
+
+def check_writable(home):
+    probe = os.path.join(home, ".doctor-probe")
+    try:
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        os.remove(probe)
+        record("writable", True, home)
+    except OSError as e:
+        record("writable", False, "%s: %s" % (home, e))
+
+
+def check_tools():
+    """The repo's own contract tests are the fastest signal that the checkout is intact.
+
+    Each entry is (label, argv tail). The shortcut selftest is invoked the way its own
+    header documents — through the parent script with `--selftest`, which supplies the
+    `$WORK` fixture root. Calling the inner file directly fails on an unbound variable,
+    which looks like a broken repo and is not.
+    """
+    tests = [
+        ("instruct-contract", ["tests/instruct-contract.sh"]),
+    ]
+    shortcut = os.path.join(HERE, "..", "tests", "shortcut-contract.sh")
+    if os.path.exists(shortcut):
+        tests.append(("shortcut-contract", ["tests/shortcut-contract.sh", "--selftest"]))
+
+    ran, bad = [], []
+    for label, tail in tests:
+        path = os.path.join(HERE, "..", tail[0])
+        if not os.path.exists(path):
+            continue
+        code, out = run(["bash", path] + tail[1:], timeout=180)
+        ran.append(label)
+        if code != 0:
+            bad.append(label)
+    if not ran:
+        record("selftests", None, "none found")
+        return
+    if bad:
+        record("selftests", False, "failed: %s" % ", ".join(bad),
+               "run the test directly to see why")
+    else:
+        record("selftests", True, "%d passed: %s" % (len(ran), ", ".join(ran)))
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--home", default=None, help="CODEX_HOME to inspect (default: the resolved real home)")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--fast", action="store_true", help="skip network probes")
+    args = ap.parse_args()
+
+    check_node()
+    check_app()
+    if args.home:
+        if not os.path.isdir(args.home):
+            record("home", False, "%s does not exist" % args.home)
+            return emit(args)
+        record("home", True, args.home, "given with --home")
+        home = args.home
+    else:
+        res = codex_home.resolve()
+        if not res.get("ok"):
+            check_home()
+            return emit(args)
+        check_home()
+        home = res.get("real") or res.get("clone")
+    names = check_profiles(home)
+    if names:
+        check_endpoint(home, names, args.fast)
+    check_catalog(home)
+    check_writable(home)
+    check_tools()
+    return emit(args)
+
+
+def emit(args):
+    if args.json:
+        print(json.dumps(RESULTS, indent=2))
+    else:
+        print("codex-doctor")
+        for r in RESULTS:
+            mark = "PASS" if r["ok"] else ("INFO" if r["ok"] is None else "FAIL")
+            print("  %-4s  %-10s %s" % (mark, r["check"], r["detail"]))
+            if r["hint"]:
+                print("        %-10s %s" % ("", r["hint"]))
+    return 0 if all(r["ok"] is not False for r in RESULTS) else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+    sys.exit(main())

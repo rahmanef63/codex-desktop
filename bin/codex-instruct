@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""Custom instructions and deterministic sampling for a Codex profile.
+
+Codex already has an instruction layer, but it is scattered and undocumented here:
+
+  * `model_instructions_file` replaces the model prompt for a profile,
+  * `AGENTS.md` / `AGENTS.override.md` add project-scoped instructions,
+  * `hooks.json` lets a command run deterministically on lifecycle events.
+
+Nothing in this repo managed any of them, so every profile ran on OpenAI's prompt and
+nothing could be pinned. This tool writes and checks those three surfaces. It does not
+invent a new mechanism: it uses the one the binary already honours (verified against
+26.1029.7803.0).
+
+What it can and cannot promise, stated once:
+
+  * instructions and hooks are DETERMINISTIC — same file, same effect, every run;
+  * sampling is NOT. `temperature`/`top_p` only reach Chat-Completions providers; the
+    Codex request path is Responses-shaped and ignores them. Even where they land, a
+    provider may batch differently run to run. `determinism` below reports what the
+    active provider can actually honour instead of pretending.
+
+Usage:
+  codex-instruct show                      # what is in effect, and why
+  codex-instruct set <profile> [--file F] [--text "…"] [--clear]
+  codex-instruct hook <profile> --event PreToolUse --command '…' [--matcher '…']
+  codex-instruct hooks <profile>           # list
+  codex-instruct determinism [--json]      # what can be pinned for the active provider
+
+Exit: 0 ok, 1 refused, 2 cannot run.
+
+Verified 2026-11-05 against Codex 26.1029.7803.0: a profile carrying
+`model_instructions_file` answered "MANGO hello"; a workspace carrying both
+`AGENTS.md` and `AGENTS.override.md` answered "FROM-OVERRIDE", so the override wins.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Top-level keys this file is allowed to touch. Anything else in the profile is left
+# byte-for-byte alone, the same rule codex-byok follows.
+INSTRUCTION_KEY = "model_instructions_file"
+HOOK_EVENTS = [
+    "PreToolUse",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "SessionStart",
+    "Stop",
+    "SubagentStop",
+    "PreCompact",
+    "Notification",
+]
+
+
+def read(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def write_atomic(path, body):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        fh.write(body)
+    os.replace(tmp, path)
+
+
+def toml_quote(value):
+    """Escape a Windows path for a TOML basic string.
+
+    A backslash is the escape character in TOML, so `C:\\Users\\rahma\\x.md` written raw
+    would silently become `C:Usersrahmax.md` and the app would read a file that does not
+    exist — no error, just the default prompt.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def set_top_level(text, key, value):
+    """Rewrite ONE top-level key, leaving every other byte alone.
+
+    Mirrors `codex-byok.set_top_level` deliberately: two writers with two ideas of what a
+    profile looks like is how a config gets mangled. A `value` of None deletes the key.
+    """
+    lines = text.splitlines()
+    pat = re.compile(rf"^{re.escape(key)}\s*=")
+    idx = None
+    section = ""
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r"^\[[^\]]+\]$", stripped):
+            section = stripped
+            continue
+        if not section and pat.match(line):
+            idx = i
+            break
+
+    if value is None:
+        if idx is None:
+            return text
+        del lines[idx]
+        return "\n".join(lines) + "\n"
+
+    newline = f'{key} = "{toml_quote(value)}"'
+    if idx is None:
+        first = next((i for i, l in enumerate(lines) if re.match(r"^\[", l.strip())), len(lines))
+        if first > 0 and lines[first - 1].strip() == "":
+            lines.insert(first - 1, newline)
+        else:
+            lines.insert(first, newline)
+    else:
+        comment = ""
+        m = re.search(r"(#.*)$", lines[idx])
+        if m:
+            comment = "  " + m.group(1).strip()
+        lines[idx] = newline + comment
+    return "\n".join(lines) + "\n"
+
+
+def get_top_level(text, key):
+    section = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^\[[^\]]+\]$", stripped):
+            section = stripped
+            continue
+        if section:
+            continue
+        m = re.match(rf"^{re.escape(key)}\s*=\s*\"(.*)\"", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def resolve_home(explicit):
+    """One resolver, same as every other caller. Refuses rather than guessing."""
+    if explicit:
+        return explicit
+    import codex_home
+
+    result = codex_home.resolve()
+    if not result.get("ok"):
+        raise SystemExit(result.get("message") or "cannot resolve a Codex home")
+    return result.get("real") or result.get("clone")
+
+
+def windows_path(path):
+    """Give the app a path it can open. The app is a Windows process: /mnt/c/... does not exist to it.
+
+    Written as a pure function because this is the one transformation whose failure is
+    invisible — a wrong path still parses, the profile still loads, and the only symptom
+    is that the custom instructions silently never apply.
+    """
+    if os.name == "nt":
+        return path
+    if not path.startswith("/mnt/") or len(path) < 8:
+        return path
+    parts = path.split("/", 3)
+    if len(parts) != 4 or len(parts[2]) != 1:
+        return path
+    return parts[2].upper() + ":\\" + parts[3].replace("/", "\\")
+
+
+def profile_path(home, name):
+    return os.path.join(home, f"{name}.config.toml")
+
+
+def hooks_path(home):
+    """Hooks are a per-home file, not a per-profile one: the binary reads
+    `$CODEX_HOME/hooks.json` and has no profile-scoped variant."""
+    return os.path.join(home, "hooks.json")
+
+
+def load_hooks(home):
+    raw = read(hooks_path(home))
+    if not raw:
+        return {"hooks": {}}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{hooks_path(home)} is not valid JSON: {e}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"{hooks_path(home)} must contain an object")
+    data.setdefault("hooks", {})
+    return data
+
+
+# --------------------------------------------------------------------- determinism
+
+def determinism_report(home, profile):
+    """Say what can actually be pinned, instead of claiming determinism.
+
+    Measured, not assumed:
+      * the Codex request is Responses-shaped; its SDK type carries no temperature,
+        top_p or seed field, and the binary contains no config key for them;
+      * the only sampling-adjacent knobs the binary does accept are
+        `model_reasoning_effort`, `model_reasoning_summary` and `model_verbosity`;
+      * the provider may still vary run to run (batching, MoE routing).
+    """
+    text = read(profile_path(home, profile)) if profile else None
+    active = {}
+    if text:
+        for key in ("model", "model_provider", "model_reasoning_effort",
+                    "model_reasoning_summary", "model_verbosity", INSTRUCTION_KEY):
+            v = get_top_level(text, key)
+            if v is not None:
+                active[key] = v
+    return {
+        "profile": profile,
+        "profile_exists": text is not None,
+        "active_keys": active,
+        "pinnable": {
+            "instructions": INSTRUCTION_KEY,
+            "hooks": "hooks.json",
+            "reasoning_effort": "model_reasoning_effort",
+            "verbosity": "model_verbosity",
+        },
+        "not_pinnable": [
+            "temperature",
+            "top_p",
+            "seed",
+        ],
+        "why": (
+            "The Codex request is Responses-shaped and carries no sampling fields; the "
+            "binary exposes no temperature/top_p/seed config key. Instruction text and "
+            "hook commands are deterministic; model tokens are not, because providers "
+            "batch and route differently between runs."
+        ),
+    }
+
+
+# --------------------------------------------------------------------- commands
+
+def cmd_show(args):
+    home = resolve_home(args.home)
+    print(f"home     {home}")
+    names = [
+        fn[: -len(".config.toml")]
+        for fn in sorted(os.listdir(home))
+        if fn.endswith(".config.toml")
+    ] if os.path.isdir(home) else []
+
+    if not names:
+        print("profiles none")
+    for n in names:
+        text = read(profile_path(home, n)) or ""
+        f = get_top_level(text, INSTRUCTION_KEY)
+        print(f"profile  {n:<14} instructions {'-> ' + f if f else '(OpenAI default)'}")
+
+    h = load_hooks(home)
+    events = h.get("hooks") or {}
+    if not events:
+        print("hooks    none")
+    for ev, groups in events.items():
+        count = sum(len(g.get("hooks") or []) for g in (groups or []))
+        print(f"hooks    {ev:<16} {count} command(s)")
+
+    for name in ("AGENTS.md", "AGENTS.override.md"):
+        p = os.path.join(home, name)
+        state = f"{os.path.getsize(p)} bytes" if os.path.exists(p) else "absent"
+        print(f"{name:<9} {state}")
+    return 0
+
+
+def cmd_set(args):
+    home = resolve_home(args.home)
+    path = profile_path(home, args.profile)
+    text = read(path)
+    if text is None:
+        print(f"no such profile: {path}", file=sys.stderr)
+        return 1
+
+    if args.clear:
+        new = set_top_level(text, INSTRUCTION_KEY, None)
+        write_atomic(path, new)
+        print(f"cleared {INSTRUCTION_KEY} from {args.profile}")
+        return 0
+
+    if args.file:
+        src = os.path.abspath(args.file)
+        body = read(src)
+        if body is None:
+            print(f"cannot read {src}", file=sys.stderr)
+            return 1
+        # Copy into the home so the profile does not depend on a file the user may move.
+        dest = os.path.join(home, f"{args.profile}.instructions.md")
+        write_atomic(dest, body)
+        target = dest
+    elif args.text is not None:
+        dest = os.path.join(home, f"{args.profile}.instructions.md")
+        write_atomic(dest, args.text if args.text.endswith("\n") else args.text + "\n")
+        target = dest
+    else:
+        print("give --file, --text or --clear", file=sys.stderr)
+        return 1
+
+    # The app is a Windows process: it cannot read a WSL path. Convert before storing.
+    stored = windows_path(os.path.abspath(target))
+
+    new = set_top_level(text, INSTRUCTION_KEY, stored)
+    write_atomic(path, new)
+    print(f"profile  {args.profile}")
+    print(f"file     {target}")
+    print(f"stored   {stored}")
+    print("")
+    print(f"Verify:  codex -p {args.profile} exec 'say hello'")
+    return 0
+
+
+def cmd_hook(args):
+    home = resolve_home(args.home)
+    if args.event not in HOOK_EVENTS:
+        print(f"unknown event {args.event}; known: {', '.join(HOOK_EVENTS)}", file=sys.stderr)
+        return 1
+    data = load_hooks(home)
+    groups = data["hooks"].setdefault(args.event, [])
+    entry = {"type": "command", "command": args.command, "timeout": args.timeout}
+    if args.matcher:
+        entry["matcher"] = args.matcher
+        group = {"matcher": args.matcher, "hooks": [entry]}
+    else:
+        group = {"hooks": [entry]}
+    groups.append(group)
+    write_atomic(hooks_path(home), json.dumps(data, indent=2) + "\n")
+    print(f"added   {args.event}  {args.command}")
+    print(f"file    {hooks_path(home)}")
+    if args.event in ("PreToolUse", "PostToolUse") and not args.matcher:
+        print("note    a tool event without --matcher runs for every tool")
+    return 0
+
+
+def cmd_hooks(args):
+    home = resolve_home(args.home)
+    data = load_hooks(home)
+    events = data.get("hooks") or {}
+    if not events:
+        print("no hooks configured")
+        return 0
+    for ev, groups in events.items():
+        for g in groups or []:
+            matcher = g.get("matcher") or "(all)"
+            for h in g.get("hooks") or []:
+                print(f"{ev:<16} {matcher:<24} {h.get('command')}")
+    return 0
+
+
+def cmd_determinism(args):
+    home = resolve_home(args.home)
+    name = args.profile
+    if not name:
+        # The active profile is whatever config.toml points at, if anything.
+        cfg = read(os.path.join(home, "config.toml")) or ""
+        pid = get_top_level(cfg, "model_provider")
+        name = pid
+    rep = determinism_report(home, name)
+    if args.json:
+        print(json.dumps(rep, indent=2))
+        return 0
+    print(f"profile  {rep['profile'] or '(none)'}")
+    for k, v in rep["active_keys"].items():
+        print(f"  {k:<24} {v}")
+    print("pinnable")
+    for k, v in rep["pinnable"].items():
+        print(f"  {k:<24} {v}")
+    print("cannot be pinned")
+    for k in rep["not_pinnable"]:
+        print(f"  {k}")
+    print("")
+    print(rep["why"])
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--home", default=None, help="CODEX_HOME (default: the resolved real home)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("show", help="what instructions and hooks are in effect")
+    s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("set", help="set the instruction file for a profile")
+    s.add_argument("profile")
+    s.add_argument("--file")
+    s.add_argument("--text")
+    s.add_argument("--clear", action="store_true")
+    s.set_defaults(fn=cmd_set)
+
+    s = sub.add_parser("hook", help="add a lifecycle hook command")
+    s.add_argument("profile", nargs="?", help="ignored: hooks are per home, kept for symmetry")
+    s.add_argument("--event", required=True, choices=HOOK_EVENTS)
+    s.add_argument("--command", required=True)
+    s.add_argument("--matcher", default=None)
+    s.add_argument("--timeout", type=int, default=10)
+    s.set_defaults(fn=cmd_hook)
+
+    s = sub.add_parser("hooks", help="list hook commands")
+    s.set_defaults(fn=cmd_hooks)
+
+    s = sub.add_parser("determinism", help="what can and cannot be pinned")
+    s.add_argument("profile", nargs="?")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_determinism)
+
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+    sys.exit(main())

@@ -4,7 +4,7 @@ Catatan kerja, bukan dokumentasi produk. Ditulis supaya sesi berikutnya tidak me
 penyelidikan yang sama. Repo produk ada di `/home/rahman/projects/lara/codex-clone-placeholder`;
 berkas ini soal setup mesin, bukan repo.
 
-Terakhir diperbarui: 2026-11-02, setelah `bin/isolation-check` (bagian 8).
+Terakhir diperbarui: 2026-11-05, setelah `bin/codex-instruct` (bagian 10) dan `bin/codex-doctor` (bagian 11).
 
 ## Status ringkas
 
@@ -801,3 +801,70 @@ Windows dan tak menyentuh Desktop. `SHORTCUT_NO_WINDOWS=1` memaksa jalur posix.
   `UNPROVEN`; itu disengaja, karena "tidak terlihat" bukan "tidak ada".
 - Shortcut yang bukan milik repo dilewati: hanya yang punya `codex-launch` di argumen atau
   berawalan `Codex` yang diperiksa.
+
+## 10. `bin/codex-instruct` — instruksi & determinisme (2026-11-05)
+
+Pertanyaan yang memicunya: "bisa tambahkan custom instruction, dan skrip untuk memotong
+deterministik LLM?" Dua hal berbeda, dan yang kedua tidak bisa dijanjikan seperti yang
+terdengar. Yang bisa dibuktikan diukur dulu.
+
+### Yang terbukti bekerja di `26.1029.7803.0`
+
+| klaim | cara | hasil |
+| --- | --- | --- |
+| `model_instructions_file` dihormati | profil membawa kunci itu, prompt `say hello` | `MANGO hello` |
+| bisa juga per-run | `-c model_instructions_file=...` | `PINEAPPLE hello!` |
+| `AGENTS.md` proyek dibaca | workspace berisi `AGENTS.md`, prompt `say hi` | instruksi terpakai |
+| `AGENTS.override.md` menang | keduanya ada | `FROM-OVERRIDE` |
+
+Kunci config yang **ada** di `app/resources/codex.exe` (355 MB): `model_instructions_file`,
+`model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`,
+`model_catalog_json`, `project_doc_max_bytes`, `project_doc_fallback_filenames`,
+`AGENTS.override.md`.
+
+Kunci yang **tidak ada**: `temperature`, `top_p`, `seed`. Yang muncul di biner adalah
+anggota tipe SDK untuk request Chat-Completions, dan jalur Codex tidak membangun request
+itu. Jadi menulis kunci itu ke profil = no-op yang tampak berhasil.
+
+Event hook yang ada: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`,
+`Stop`, `SubagentStop`, `PreCompact`, `Notification`.
+
+### Dua kegagalan senyap yang harus ditutup
+
+1. **Path `/mnt/c/...` disimpan apa adanya.** Codex proses Windows; path itu tidak ada
+   baginya. Profil tetap termuat, instruksi tidak pernah terpakai, tidak ada error.
+2. **Backslash tidak di-escape untuk TOML.** `C:\Users\rahma\x.md` jadi
+   `C:Usersrahmax.md` — file yang tidak ada, lagi-lagi tanpa error.
+
+Keduanya sekarang fungsi murni (`windows_path`, `toml_quote`) dan diuji dengan mutasi:
+menghapus escape → 1 FAIL; mematikan translasi → 1 FAIL.
+
+### Yang tidak dijanjikan
+
+`determinism` sengaja melaporkan `temperature`/`top_p`/`seed` sebagai `not_pinnable`.
+Yang deterministik adalah teks instruksi, aturan proyek, perintah hook, dan verifikasinya —
+bukan token model. Provider tetap bisa membatch dan merutekan berbeda antar run.
+
+## 11. `bin/codex-doctor` — satu verdict (2026-11-05)
+
+Tujuh skrip di `bin/` masing-masing menjawab satu pertanyaan, dan pengguna baru tidak tahu
+mana yang dijalankan lebih dulu. `codex-doctor` menjalankan yang murah dan tanpa efek
+samping, berurutan, lalu mencetak satu verdict:
+
+`app → home → profiles → endpoint → model → catalog → writable → selftests`
+
+Dua bug ditemukan saat membuatnya, keduanya karena memeriksa dengan asumsi salah:
+
+| bug | gejala | sebab |
+| --- | --- | --- |
+| `endpoint` melaporkan "no base_url" | profil valid dianggap kosong | mencari `model_provider` di `config.toml`, padahal `-p <name>` mengambilnya dari profil |
+| `selftests` FAIL | repo tampak rusak | memanggil `tests/shortcut-contract-selftest.sh` langsung; ia butuh `$WORK` yang disiapkan induknya lewat `--selftest` |
+
+Keduanya hanya ketahuan karena dijalankan pada home nyata, bukan fixture.
+
+### Batas
+
+- Read-only: satu-satunya tulisan adalah file probe `.doctor-probe` yang langsung dihapus.
+- Token dibaca untuk autentikasi, tidak pernah dicetak.
+- `--fast` melewati probe jaringan, untuk dipakai offline atau di CI.
+- Exit 0 sehat, 1 ada yang gagal, 2 tidak bisa jalan.
