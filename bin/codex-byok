@@ -232,6 +232,11 @@ def cmd_profile(args):
     if args.action == "list":
         names = list_profiles(home)
         if not names:
+            # Machine-readable output must stay machine-readable. An empty list is [] with
+            # exit 0 — a caller parsing JSON must not have to know that "empty" prints prose.
+            if args.json:
+                print("[]")
+                return 0
             print(f"no profiles in {home}")
             return 1
         rows = [probe_profile(home, n) for n in names]
