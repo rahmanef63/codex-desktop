@@ -16,10 +16,17 @@ Verified 2026-11-05 against `OpenAI.Codex 26.1029.7803.0` on this machine:
 | claim | how it was proved | result |
 |---|---|---|
 | `model_instructions_file` is honoured | profile carrying the key, prompt `say hello` | `MANGO hello` |
+| **it REPLACES the prompt, it does not add to it** | `session_meta.base_instructions` with and without the key, same profile | **388 chars vs 21638** |
 | it can also be passed per run | `-c model_instructions_file=...` | `PINEAPPLE hello!` |
 | project `AGENTS.md` is read | workspace with `AGENTS.md`, prompt `say hi` | instruction applied |
 | `AGENTS.override.md` wins over `AGENTS.md` | both present, same workspace | `FROM-OVERRIDE` |
 | `hooks.json` has lifecycle events | strings in `codex.exe` | `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop`, `SubagentStop`, `PreCompact`, `Notification` |
+
+**Use `AGENTS.md` for extra rules, not `model_instructions_file`.** The second row is the one
+that bites: a four-line instruction file on the 9router profile shrank the agent's entire
+system prompt by 98%, which is why turns ended after a short answer instead of finishing the
+work. Only reach for `model_instructions_file` when replacing the prompt is the goal — a
+deliberately different agent, not "the same agent with a couple of house rules".
 
 Strings measured in `app/resources/codex.exe` (355 MB):
 

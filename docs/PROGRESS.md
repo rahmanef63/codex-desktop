@@ -1031,3 +1031,68 @@ Sekarang memakai, dan path paket hanya jadi fallback berperingatan.
 Catatan jujur: saya sendiri yang menulis ikon rusak itu ke dua shortcut saat menjalankan
 installer untuk pertama kali (sebelum memperbaiki installernya). Sudah ditimpa ulang lewat
 installer yang benar; `R4` PASS untuk kedua shortcut.
+
+## 15. Akar sebenarnya "kurang effort": `model_instructions_file` MENGGANTI prompt (2026-11-05)
+
+Ini temuan terpenting hari ini, dan penyebab paling langsung dari keluhan "kerjanya sebentar
+sekali, sering tidak menyelesaikan tugas, seperti kurang effort".
+
+### Yang terukur
+
+`session_meta.base_instructions` di setiap rollout menyimpan prompt sistem yang benar-benar
+dipakai. Panjangnya:
+
+| profil | `model_instructions_file` | `base_instructions` |
+| --- | --- | --- |
+| klon, sebelum | tidak ada | **21.546** char |
+| klon, sesudah saya tambahkan | ada (4 baris) | **388** char |
+| ChatGPT asli (`openai`) | tidak ada | 21.524 char |
+
+Jadi berkas itu **mengganti** seluruh prompt Codex, bukan menambahkan. Prompt asli berisi
+"collaborate with them until their intended goal is completely handled", aturan batching tool,
+aturan verifikasi, dan seterusnya. Yang tersisa setelah ditimpa:
+
+```
+You are a local coding agent. Work inside the workspace only.
+- Reply with the final answer only. One or two short sentences.
+```
+
+"One or two short sentences" adalah instruksi yang saya tulis sendiri di
+`~/.codex/9router.instructions.md` untuk mencegah kebocoran reasoning. Efek sampingnya:
+agent berhenti setelah satu-dua kalimat, karena begitulah yang diperintahkan.
+
+### Kronologi yang cocok dengan keluhan
+
+| waktu | `base_instructions` di profil 9router |
+| --- | --- |
+| sebelum 2026-11-05 03:30 | 21.546 — normal |
+| sejak 03:30 (berkas dibuat) | **388** — agent jadi pendek |
+
+Sesi 03:44 (yang berhenti setelah `wait_agent` timeout tanpa menyentuh satu berkas) **masih**
+21.546; sesi 04:41 ke atas sudah 388. Jadi keduanya masalah berbeda, dan §13/§16 menangani
+yang lain. Yang ini yang membuat semua percobaan sesudahnya terasa "kurang effort".
+
+### Perbaikan
+
+| tempat | tindakan |
+| --- | --- |
+| `9router.config.toml` (home asli) | `model_instructions_file` **dihapus**, diganti komentar yang menjelaskan sebabnya |
+| `~/.codex/AGENTS.md` (baru) | aturan yang sama, di permukaan yang **menambahkan**, bukan mengganti |
+| `scripts/codex-launch.ps1` | tidak lagi menyetel berkas itu; `Set-CloneTopLevelRemove` menghapusnya kalau config lama masih membawanya |
+| `scripts/clone-AGENTS.md` | diperluas: aturan output + shell + sub-agent |
+| `docs/INSTRUCTIONS.md` | baris "it REPLACES the prompt" masuk tabel terukur |
+
+### Bukti
+
+| probe | hasil |
+| --- | --- |
+| klon, `model_instructions_file` dihapus | `base_instructions` = **21.638** char |
+| idem, tanpa tool | dijawab "max 3 sub-agents; wait_agent timeout_ms 600000; wsl.exe -d Ubuntu --cd ..." — artinya `AGENTS.md` tetap terbaca |
+| `app/tests/test-removekey.ps1` | 4/4: top-level hilang, key di dalam `[table]` utuh, idempoten |
+| `app/tests/run-tests.mjs` | 8/8 |
+
+### Pelajaran yang berlaku umum
+
+`model_instructions_file` bukan tempat menaruh "beberapa aturan tambahan". Ia adalah
+pengganti prompt penuh. Untuk menambah aturan: `AGENTS.md`. Untuk mengganti agent sepenuhnya:
+baru `model_instructions_file`.

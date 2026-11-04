@@ -80,10 +80,34 @@ function Set-CloneWindowsSandboxElevated($configPath) {
     }
 }
 
-# The app rewrites the top-level `model` (and sometimes `model_provider`) from the last UI
-# pick. In the clone that lands on a ChatGPT-only slug the nine_router provider cannot serve,
-# which surfaces as "Invalid model metadata". Re-assert both on every clone run. Only the
-# two top-level keys are touched; every [section] below them is left alone.
+function Set-CloneTopLevelRemove($configPath, $key) {
+    # Delete ONE top-level key if present. Needed because `model_instructions_file` replaces
+    # the Codex prompt wholesale, so leaving a stale one silently shrinks it (PROGRESS 15).
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $raw = [System.IO.File]::ReadAllText($configPath, $utf8)
+    $newline = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $endsWithNewline = $raw.EndsWith("`n")
+    $suffix = if ($endsWithNewline) { $newline } else { '' }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.AddRange([string[]]($raw -split "`r?`n"))
+    if ($endsWithNewline) { $lines.RemoveAt($lines.Count - 1) }
+
+    $pattern = '^' + [regex]::Escape($key) + '\s*='
+    $inSection = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $trimmed = $lines[$i].Trim()
+        if ($trimmed -match '^\[[^\[\]]+\]$') { $inSection = $true; continue }
+        if ($inSection) { continue }
+        if ($trimmed -match $pattern) {
+            $lines.RemoveAt($i)
+            [System.IO.File]::WriteAllText($configPath, (($lines -join $newline) + $suffix), $utf8)
+            Write-Host "$key removed (it replaces the Codex prompt instead of adding to it)"
+            return
+        }
+    }
+}
+
 function Set-CloneTopLevel($configPath, $key, $value) {
     # Rewrite ONE top-level key, leaving every other byte alone (CONTRACT §5). Used for keys
     # the app never writes, where "already correct" must be a no-op instead of a rewrite.
@@ -124,6 +148,10 @@ function Set-CloneTopLevel($configPath, $key, $value) {
     Write-Host "$key added"
 }
 
+# The app rewrites the top-level `model` (and sometimes `model_provider`) from the last UI
+# pick. In the clone that lands on a ChatGPT-only slug the nine_router provider cannot serve,
+# which surfaces as "Invalid model metadata". Re-assert both on every clone run. Only the
+# two top-level keys are touched; every [section] below them is left alone.
 function Set-CloneModel($configPath, $model, $provider) {
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     $raw = [System.IO.File]::ReadAllText($configPath, $utf8)
@@ -317,24 +345,29 @@ if ($Mode -eq 'clone') {
         }
     }
 
-    # The clone config was seeded before `model_instructions_file` existed, so deepseek there
-    # leaks its deliberation into stdout and burns ~12k extra tokens per sub-agent turn.
-    # Point it at the real home's file, which the launcher already keeps current.
-    $instrPath = Join-Path $realHome '9router.instructions.md'
-    if (Test-Path -LiteralPath $instrPath) {
-        Set-CloneTopLevel $targetConfig 'model_instructions_file' $instrPath
-    }
+    # `model_instructions_file` REPLACES the whole Codex prompt, it does not add to it. Measured
+    # 2026-11-05: a clone carrying it reported base_instructions 388 chars against 21638
+    # without it, because the file is four lines of output rules and nothing else. That is what
+    # made the agent stop after a short answer. Never set it here; put additions in AGENTS.md,
+    # which is appended instead of substituted. Remove it if an older config still has it.
+    Set-CloneTopLevelRemove $targetConfig 'model_instructions_file'
 
     # The clone's global AGENTS.md was 0 bytes, so the model ran with no project rules at all:
     # no UNC workaround, no batching rule, nothing about the 3-agent limit or the 60 s wait
-    # ceiling that ended turns mid-task. Seed it from the repo, and refill it if it is empty.
-    # Never overwrite a file the user has since edited.
+    # ceiling that ended turns mid-task. AGENTS.md is APPENDED to the Codex prompt, which is
+    # the correct surface for these rules (see the model_instructions_file removal above).
+    # Seed it from the repo, refill it if empty, and never overwrite an edited file.
     $agentsMd = Join-Path $cloneHome 'AGENTS.md'
     $agentsSeed = Join-Path $PSScriptRoot 'clone-AGENTS.md'
     if ((Test-Path -LiteralPath $agentsSeed) -and
         (-not (Test-Path -LiteralPath $agentsMd) -or (Get-Item -LiteralPath $agentsMd).Length -eq 0)) {
         Copy-Item -LiteralPath $agentsSeed -Destination $agentsMd -Force
         Write-Host 'seeded AGENTS.md'
+    } elseif ((Test-Path -LiteralPath $agentsSeed) -and (Test-Path -LiteralPath $agentsMd)) {
+        # A shorter-than-seed AGENTS.md is the stale 0-byte-era file that predates the rules.
+        if ((Get-Item -LiteralPath $agentsMd).Length -lt (Get-Item -LiteralPath $agentsSeed).Length) {
+            Write-Host 'note: clone AGENTS.md is shorter than scripts/clone-AGENTS.md; leaving your version alone'
+        }
     }
 
     # Per-mode state starts empty. This is the whole point of the split.
