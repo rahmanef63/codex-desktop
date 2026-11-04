@@ -14,10 +14,11 @@
  * it; `python3 -c "import yaml"` in the verify step covers full-schema validity.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 
-const yml = readFileSync(path.join(import.meta.dirname, "..", "electron-builder.yml"), "utf8");
+const root = path.join(import.meta.dirname, "..");
+const yml = readFileSync(path.join(root, "electron-builder.yml"), "utf8");
 
 /** Top-level key -> value, plus `block:child` for one level of nesting. Comments dropped. */
 function parse(src) {
@@ -52,9 +53,16 @@ assert.notEqual(cfg["win.signAndEditExecutable"], "false", "must not disable rce
 assert.match(yml, /xattr -dr com\.apple\.quarantine/, "the allow-locally command must be in the config");
 assert.match(yml, /per-machine override/i, "and labelled as an override, not a fix");
 
-// 4. No icon path, because this branch has no build/ assets: a missing file fails the build.
-assert.equal(cfg["mac.icon"], undefined);
-assert.equal(cfg["win.icon"], undefined);
+// 4. The icon must be DECLARED and the file must exist. A declared-but-missing path
+// fails the build outright, which is why this checks both halves.
+const iconRel = "build/icon.png";
+assert.equal(cfg["mac.icon"], iconRel, "mac.icon must point at build/icon.png");
+assert.equal(cfg["win.icon"], iconRel, "win.icon must point at build/icon.png");
+assert.ok(existsSync(path.join(root, iconRel)), iconRel + " must exist next to the config");
+// A real icon is bigger than a placeholder and carries the PNG signature.
+const iconBytes = readFileSync(path.join(root, iconRel));
+assert.ok(iconBytes.length > 2000, "icon must not be a 1x1 placeholder");
+assert.deepEqual([...iconBytes.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], "icon must be a PNG");
 
 // 5. Both mac arches and both mac targets.
 assert.match(yml, /target: dmg\n\s+arch: \[arm64, x64\]/);

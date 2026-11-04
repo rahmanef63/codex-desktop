@@ -16,15 +16,17 @@ files:
 # cross-platform; `codex-version-drift` degrades to "not measurable" where there is no
 # MSIX (macOS), which is what makes this bundle launchable on both platforms.
 extraResources:
-  - from: ../../bin/codex-byok
+  - from: ../bin/codex-byok
     to: bin/codex-byok
-  - from: ../../bin/codex-version-drift
+  - from: ../bin/codex-version-drift
     to: bin/codex-version-drift
 
 asar: true
 
 # ---------------------------------------------------------------------------- Windows
 win:
+  # Icon comes from build/ (buildResources). electron-builder converts icon.png to .ico.
+  icon: build/icon.png
   target:
     - target: nsis
       # x64 only: Electron 44 dropped ia32 entirely (ia32 needs electron <= 43), and the
@@ -83,6 +85,7 @@ nsis:
 # Verify locally with `codesign -dv "dist/mac-arm64/Codex BYOK.app"` before believing
 # either build runs.
 mac:
+  icon: build/icon.png
   category: public.app-category.developer-tools
   identity: null
   notarize: false
@@ -105,7 +108,3 @@ mac:
 dmg:
   artifactName: ${productName}-${version}-${arch}.dmg
 
-# No `icon` keys: this branch carries no build/ assets, and pointing at a missing
-# build/icon.icns fails the build outright. electron-builder falls back to the default
-# Electron icon and warns. Add `build/icon.icns` (and `build/icon.ico` for win) when there
-# is artwork, then set `mac.icon` / `win.icon`.
