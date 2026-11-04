@@ -80,39 +80,45 @@ Write-Host "launcher: $Launcher"
 # ---------------------------------------------------------------- icon, resolved not pinned
 #
 # Get-AppxPackage is the supported way to ask Windows where a packaged app actually lives.
-# It is answered by the package database, not by a path we guessed, so it keeps working after
-# every Store update: the query returns a new InstallLocation and the icon follows it.
-# Nothing here contains a version number.
+# But pointing a shortcut INSIDE that directory is exactly the bug this repo exists to avoid:
+# the folder name embeds the version and moves on every Store update. scripts/resolve-codex-icon.ps1
+# already copies the shipped art to %LOCALAPPDATA%\codex-desktop\icon.ico for that reason, so use
+# it and keep the package path only as a warned fallback.
+#
+# tests/shortcut-contract.sh R4 fails any link carrying an OpenAI.Codex_<version>_ path, so the
+# fallback is a defect signal, not a normal mode.
 function Resolve-CodexIcon([ValidateSet('exe', 'ico')][string]$Prefer) {
     $pkg = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $pkg -or -not $pkg.InstallLocation) {
         throw "OpenAI.Codex is not registered for this user (Get-AppxPackage found no InstallLocation). Refusing to write a shortcut whose icon would be a guess."
     }
-    $root = $pkg.InstallLocation
-    $byKind = @{
-        # The mode shortcuts historically used different art; keep that, since it is the only
-        # thing that tells the two apart on a desktop full of icons.
-        ico = @(
-            'app\resources\chatgpt-app-light.ico',
-            'app\resources\icon-chatgpt.ico',
-            'app\ChatGPT.exe'
-        )
-        exe = @(
-            'app\ChatGPT.exe',
-            'app\resources\chatgpt-app-light.ico'
-        )
-    }
-    foreach ($rel in $byKind[$Prefer]) {
-        $candidate = Join-Path $root $rel
-        if (Test-Path -LiteralPath $candidate) {
+
+    $resolver = Join-Path $PSScriptRoot 'resolve-codex-icon.ps1'
+    if (Test-Path -LiteralPath $resolver) {
+        $stable = & $resolver 2>$null
+        if ($LASTEXITCODE -eq 0 -and $stable -and (Test-Path -LiteralPath $stable)) {
             return [pscustomobject]@{
-                Path    = $candidate
+                Path    = $stable
                 Version = $pkg.Version
-                Source  = 'Get-AppxPackage OpenAI.Codex -> InstallLocation'
+                Source  = 'resolve-codex-icon.ps1 -> %LOCALAPPDATA%\codex-desktop\icon.ico'
             }
         }
     }
-    throw "package OpenAI.Codex $($pkg.Version) is installed at $root but none of these exist: $($byKind[$Prefer] -join ', '). Refusing to write an icon path that does not exist."
+
+    # Degraded: the icon is right today and breaks on the next Store update.
+    $root = $pkg.InstallLocation
+    foreach ($rel in @('app\ChatGPT.exe', 'app\resources\chatgpt-app-light.ico')) {
+        $candidate = Join-Path $root $rel
+        if (Test-Path -LiteralPath $candidate) {
+            Write-Warning ("falling back to a version-pinned icon: {0} (breaks on the next Store update; run scripts/resolve-codex-icon.ps1)" -f $candidate)
+            return [pscustomobject]@{
+                Path    = $candidate
+                Version = $pkg.Version
+                Source  = 'package path fallback (version-pinned)'
+            }
+        }
+    }
+    throw "package OpenAI.Codex $($pkg.Version) is installed at $root but no usable icon was found."
 }
 
 $icons = @{}
