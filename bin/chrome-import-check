@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Check the two claims in docs/CHROME-IMPORT.md that a user can act on, read-only.
+#
+#   bin/chrome-import-check            # report profile lock state + App-Bound Encryption
+#   bin/chrome-import-check --quiet    # exit code only
+#
+# Exit 0 = at least one Chrome profile is importable right now without closing Chrome.
+# Exit 1 = every profile with the import targets on disk is locked.
+# Exit 2 = could not measure (no PowerShell, no Chrome, wrong platform). "Could not check" is
+#          never a pass, same rule as bin/isolation-check.
+#
+# Read-only by construction: opens files to test sharing, copies nothing, writes nothing under
+# the Chrome user-data directory. It never stops, restarts or kills a browser process.
+set -uo pipefail
+
+QUIET=0
+[ "${1:-}" = "--quiet" ] && QUIET=1
+
+say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+die() { printf 'chrome-import-check: %s\n' "$*" >&2; exit 2; }
+
+command -v powershell.exe >/dev/null 2>&1 || die "powershell.exe not on PATH; this check is Windows-only"
+
+# The whole probe runs inside PowerShell: the sharing test is a Windows file-semantics question
+# and cannot be answered from WSL, where a denied read is indistinguishable from a DOS quirk.
+OUT=$(powershell.exe -NoProfile -Command '
+$ud = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"
+if (-not (Test-Path -LiteralPath $ud)) { "ERROR no-chrome-user-data"; exit 3 }
+$profiles = Get-ChildItem -LiteralPath $ud -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSIsContainer -and $_.Name -match "^(Default|Profile \d+)$" }
+if (-not $profiles) { "ERROR no-profiles"; exit 3 }
+
+$free = @(); $locked = @(); $nofiles = @()
+foreach ($p in $profiles) {
+  $cookies = Join-Path $p.FullName "Network\Cookies"
+  $logins  = Join-Path $p.FullName "Login Data"
+  if (-not (Test-Path -LiteralPath $cookies) -and -not (Test-Path -LiteralPath $logins)) {
+    $nofiles += $p.Name; continue
+  }
+  # Cookies is the file that decides it: a recursive profile copy aborts here first.
+  if (Test-Path -LiteralPath $cookies) {
+    try { $fs = [IO.File]::Open($cookies, "Open", "Read", "ReadWrite"); $fs.Close(); $free += $p.Name }
+    catch { $locked += $p.Name }
+  } else { $free += $p.Name }   # no cookie DB to lock; the rest copies
+}
+
+$state = Get-Content -LiteralPath (Join-Path $ud "Local State") -Raw -ErrorAction SilentlyContinue |
+         ConvertFrom-Json -ErrorAction SilentlyContinue
+"PROFILES_FREE="   + ($free   -join ", ")
+"PROFILES_LOCKED=" + ($locked -join ", ")
+"PROFILES_EMPTY="  + ($nofiles -join ", ")
+if ($state -and $state.profile) { "LAST_USED=" + $state.profile.last_used }
+if ($state -and $state.os_crypt) {
+  "ABE=" + [bool]($state.os_crypt.PSObject.Properties.Name -contains "app_bound_encrypted_key")
+}
+') || die "probe failed"
+
+# PowerShell writes CRLF; a trailing \r would make an empty value look non-empty.
+OUT=$(printf '%s\n' "$OUT" | tr -d '\r')
+
+case "$OUT" in
+  *ERROR*) die "$(printf '%s' "$OUT" | tr '\n' ' ')" ;;
+esac
+
+get() { printf '%s\n' "$OUT" | sed -n "s/^$1=//p"; }
+
+FREE=$(get PROFILES_FREE)
+LOCKED=$(get PROFILES_LOCKED)
+EMPTY=$(get PROFILES_EMPTY)
+LAST=$(get LAST_USED)
+ABE=$(get ABE)
+
+say "chrome-import-check  (read-only; nothing closed, nothing copied)"
+say "  last_used profile : ${LAST:-unknown}"
+say "  importable now    : ${FREE:-none}"
+say "  locked (in use)   : ${LOCKED:-none}"
+say "  no import targets : ${EMPTY:-none}"
+say "  App-Bound Encrypt.: ${ABE:-unknown}"
+
+if [ -n "$FREE" ]; then
+  say ""
+  say "  PASS  at least one profile imports with Chrome still running."
+  say "        Pick one of: $FREE"
+  [ "$ABE" = "True" ] && say "        Cookies/passwords still need the 'Administrator approval required' consent."
+  exit 0
+fi
+
+say ""
+say "  FAIL  every profile with import targets is held open by Chrome."
+say "        Close Chrome completely, or import from a profile that is not loaded."
+exit 1

@@ -26,6 +26,7 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `bin/codex-real-quicktest` | Proves chat, exec and MCP against both providers. |
 | `bin/codex-caps-quicktest` | Prints the capability matrix and probes it. |
 | `bin/codex-clone-quicktest` | Gates the sibling web repo: lint, types, tests, build, boot. |
+| `bin/chrome-import-check` | Read-only: which Chrome profiles are importable *right now* and whether App-Bound Encryption is on. Answers "is it really the lock". |
 | `bin/qcheck` | Runs both quick tests and prints one verdict. |
 | `bin/isolation-check` | `snapshot` before a probe, `verify` after: proves the real account's sessions, config, auth, links and processes were untouched. Enforces CONTRACT §13. Runs on WSL, Linux and macOS from one script. |
 | `tests/isolation-check.sh` | Drives the platform layer against fake homes in `/tmp`: clean tree, escaping symlink, leaked session, config byte change, missing home. No Windows needed. |
