@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""Manage BYOK provider profiles for Codex, and pick a model across all of them.
+
+Codex already supports this natively: `codex -p <name>` layers
+`$CODEX_HOME/<name>.config.toml` on top of `config.toml`. That is a free, built-in
+mechanism — no Electron app, no installer, no signing. This script only makes it
+ergonomic:
+
+  profile list              show every profile and what it points at
+  profile show <name>       print one profile's provider block
+  profile add <name> ...    create a profile from a gateway + key env var
+  profile remove <name>     delete a profile (keeps the catalog)
+  pick                      list every model every profile serves, and select one
+  apply <profile>[:<model>] write it into the clone config as the active choice
+
+The key is never stored here. A profile references an ENVIRONMENT VARIABLE, so the
+secret stays in the shell or in the OS keyring, per CONTRACT §9-10.
+
+Usage:
+  codex-byok profile list
+  codex-byok profile add local --base-url http://127.0.0.1:20128/v1 --key-env NINE_ROUTER_KEY
+  codex-byok pick
+  codex-byok apply local:ctx/ollama/kimi-k3:cloud
+
+Exit: 0 ok, 1 nothing to do / not found, 2 could not measure.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_HOME = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex-clone")
+RESERVED = {"config"}  # config.toml itself is not a profile
+
+
+# ----------------------------------------------------------------- profile files
+
+def home_dir(explicit=None):
+    return explicit or DEFAULT_HOME
+
+
+def profile_path(home, name):
+    return os.path.join(home, f"{name}.config.toml")
+
+
+def list_profiles(home):
+    out = []
+    try:
+        names = os.listdir(home)
+    except OSError:
+        return out
+    for fn in sorted(names):
+        if not fn.endswith(".config.toml"):
+            continue
+        stem = fn[: -len(".config.toml")]
+        if stem in RESERVED:
+            continue
+        out.append(stem)
+    return out
+
+
+def read(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def provider_block(text):
+    """The `[model_providers.<id>]` table as {id, base_url, key_env, wire_api, token_inline}.
+
+    Two ways a key can be carried, and the app accepts both:
+      env_key                    the key stays in the environment (CONTRACT §9 prefers this)
+      experimental_bearer_token  the key sits in the profile file (what ~/.codex/9router
+                                 .config.toml already does, because the app cannot read a
+                                 shell environment on Windows)
+
+    We never print the value, only whether one is present.
+    """
+    if not text:
+        return None
+    m = re.search(r'^\[model_providers\.([^\]]+)\]', text, re.MULTILINE)
+    if not m:
+        return None
+    pid = m.group(1).strip().strip('"')
+    tail = text[m.end():]
+    nxt = re.search(r'^\[', tail, re.MULTILINE)
+    body = tail[: nxt.start()] if nxt else tail
+    def grab(key):
+        mm = re.search(rf'^\s*{key}\s*=\s*"([^"]*)"', body, re.MULTILINE)
+        return mm.group(1) if mm else None
+    inline = grab("experimental_bearer_token")
+    return {
+        "id": pid,
+        "base_url": grab("base_url"),
+        "key_env": grab("env_key"),
+        "wire_api": grab("wire_api"),
+        "token_inline": bool(inline),
+        "_token": inline,  # private; scrubbed before anything is printed
+    }
+
+
+def model_of(text):
+    m = re.search(r'^\s*model\s*=\s*"([^"]*)"', text or "", re.MULTILINE)
+    return m.group(1) if m else None
+
+
+# ----------------------------------------------------------------- gateway probe
+
+def fetch_models(base_url, key):
+    """The model list a profile can actually serve. Returns (ids, error)."""
+    url = base_url.rstrip("/") + "/models"
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+        return [m.get("id") for m in data.get("data", []) if m.get("id")], None
+    except urllib.error.HTTPError as e:
+        return [], f"HTTP {e.code}"
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        return [], type(e).__name__
+
+
+def probe_profile(home, name):
+    """Everything needed to show or use one profile, with nothing secret in it."""
+    full = provider_block(read(profile_path(home, name)))
+    if not full:
+        return {"name": name, "error": "no [model_providers.*] table"}
+    # Scrub before the dict can reach any output path.
+    p = {k: v for k, v in full.items() if not k.startswith("_")}
+    key = full.get("_token") or os.environ.get(full.get("key_env") or "", "")
+    row = {"name": name, **p, "key_present": bool(key), "models": [], "probe_error": None}
+    if not key:
+        row["probe_error"] = (f"env {p['key_env']} is not set" if p.get("key_env")
+                              else "no env_key and no experimental_bearer_token")
+    elif not p["base_url"]:
+        row["probe_error"] = "profile has no base_url"
+    else:
+        ids, err = fetch_models(p["base_url"], key)
+        row["models"] = ids
+        row["probe_error"] = err
+    return row
+
+
+# ----------------------------------------------------------------- add / write
+
+PROFILE_TEMPLATE = """# BYOK profile generated by codex-byok.
+{note}
+model_provider = "{pid}"
+model = "{model}"
+
+[model_providers.{pid}]
+name = "{pid}"
+base_url = "{base_url}"
+{auth}
+wire_api = "responses"
+requires_openai_auth = false
+
+# Tool calling depends on both of these on every catalog entry (CONTRACT §8).
+"""
+
+
+def write_profile(home, name, base_url, key_env, pid, model, token=None):
+    path = profile_path(home, name)
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".bak")
+    if token:
+        # The app cannot read a shell environment on Windows, so the practical form is the
+        # inline token the existing 9router profile already uses. Note the trade-off in the
+        # header comment instead of pretending it is not happening.
+        auth = f'experimental_bearer_token = "{token}"'
+        note = "# key is stored INLINE in this file (mode 600); move to env_key if the app allows it"
+    else:
+        auth = f'env_key = "{key_env}"'
+        note = "# the key lives in the environment, never here (CONTRACT §9)"
+    body = PROFILE_TEMPLATE.format(
+        pid=pid, base_url=base_url.rstrip("/"), auth=auth, note=note, model=model
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    if token:
+        os.chmod(path, 0o600)
+    return path
+
+
+def set_top_level(text, key, value):
+    """Rewrite ONE top-level key, leaving every other byte alone (CONTRACT §5)."""
+    lines = text.splitlines()
+    pat = re.compile(rf'^{re.escape(key)}\s*=')
+    idx = None
+    section = ""
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if re.match(r'^\[[^\]]+\]$', stripped):
+            section = stripped
+            continue
+        if not section and pat.match(line):
+            idx = i
+            break
+
+    newline = f'{key} = "{value}"'
+    if idx is None:
+        # Insert before the first table so it stays top-level. Preserve the blank line that
+        # typically separates the header from the first table: insert *above* it, so the file
+        # keeps its shape.
+        first = next((i for i, l in enumerate(lines) if re.match(r'^\[', l.strip())), len(lines))
+        if first > 0 and lines[first - 1].strip() == "":
+            lines.insert(first - 1, newline)
+        else:
+            lines.insert(first, newline)
+    else:
+        # Keep a trailing comment on the same line. The app writes some keys with one, and
+        # dropping it is a quiet edit to a file we were told not to rewrite.
+        existing = lines[idx]
+        comment = ""
+        m = re.search(r'(#.*)$', existing)
+        if m:
+            comment = "  " + m.group(1).strip()
+        lines[idx] = newline + comment
+    return "\n".join(lines) + "\n"
+
+
+# ----------------------------------------------------------------- commands
+
+def cmd_profile(args):
+    home = home_dir(args.home)
+    if args.action == "list":
+        names = list_profiles(home)
+        if not names:
+            print(f"no profiles in {home}")
+            return 1
+        rows = [probe_profile(home, n) for n in names]
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        for r in rows:
+            key = "key" if r.get("key_present") else "NO KEY"
+            print(f"{r['name']:<14} {r.get('id') or '?':<14} {key:<7} {r.get('base_url') or '?'}")
+            if r.get("probe_error"):
+                print(f"{'':<14} {r['probe_error']}")
+            elif r["models"]:
+                print(f"{'':<14} {len(r['models'])} models")
+        return 0
+
+    if args.action == "show":
+        p = read(profile_path(home, args.name))
+        if p is None:
+            print(f"no such profile: {args.name}", file=sys.stderr)
+            return 1
+        print(p)
+        return 0
+
+    if args.action == "add":
+        if not (args.name and args.base_url):
+            print("profile add needs <name> --base-url ... plus --key-env or --token-stdin", file=sys.stderr)
+            return 2
+        token = None
+        if args.token_stdin:
+            token = sys.stdin.readline().strip()
+            if not token:
+                print("--token-stdin got an empty line", file=sys.stderr)
+                return 2
+        if not token and not args.key_env:
+            print("profile add needs --key-env NAME or --token-stdin", file=sys.stderr)
+            return 2
+        pid = args.provider_id or "byok_" + args.name
+        model = args.model or ""
+        path = write_profile(home, args.name, args.base_url, args.key_env, pid, model, token)
+        print(f"wrote {path}")
+        if token:
+            print("  token stored INLINE, mode 600 (the app cannot read a shell env on Windows)")
+        else:
+            print(f"  key will be read from ${args.key_env} at run time; nothing secret is stored")
+        return 0
+
+    if args.action == "remove":
+        path = profile_path(home, args.name)
+        if not os.path.exists(path):
+            print(f"no such profile: {args.name}", file=sys.stderr)
+            return 1
+        os.remove(path)
+        print(f"removed {path}")
+        return 0
+    return 2
+
+
+def cmd_pick(args):
+    home = home_dir(args.home)
+    names = list_profiles(home)
+    if not names:
+        print(f"no profiles in {home}", file=sys.stderr)
+        return 1
+    rows = [probe_profile(home, n) for n in names]
+
+    flat = []
+    for r in rows:
+        for mid in r["models"]:
+            flat.append((r["name"], mid))
+
+    if args.json:
+        print(json.dumps(flat, indent=2))
+        return 0
+    if not flat:
+        for r in rows:
+            print(f"{r['name']}: {r.get('probe_error') or 'no models'}", file=sys.stderr)
+        return 2
+
+    width = max(len(f"{p}:{m}") for p, m in flat)
+    for i, (p, m) in enumerate(flat, 1):
+        print(f"{i:>3}  {p + ':' + m:<{width}}")
+    print(f"\n{len(flat)} models across {len({p for p, _ in flat})} profile(s)")
+    print("pick one with:  codex-byok apply <profile>:<model>")
+    return 0
+
+
+def cmd_apply(args):
+    if ":" not in args.target:
+        print("apply needs <profile>:<model>", file=sys.stderr)
+        return 2
+    # A model id may itself contain a colon (ctx/ollama/kimi-k3:cloud), so split once.
+    name, model = args.target.split(":", 1)
+    home = home_dir(args.home)
+    prof = provider_block(read(profile_path(home, name)))
+    if not prof:
+        print(f"no such profile: {name}", file=sys.stderr)
+        return 1
+
+    cfg_path = os.path.join(home, "config.toml")
+    text = read(cfg_path)
+    if text is None:
+        print(f"no config.toml in {home}", file=sys.stderr)
+        return 1
+    shutil.copy2(cfg_path, cfg_path + ".bak")
+
+    text = set_top_level(text, "model_provider", prof["id"])
+    text = set_top_level(text, "model", model)
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+    print(f"active: {prof['id']} / {model}")
+    print("  config.toml backed up to config.toml.bak")
+    key = prof.get("_token") or os.environ.get(prof.get("key_env") or "", "")
+    if not key:
+        where = f"${prof['key_env']}" if prof.get("key_env") else "the profile"
+        print(f"  WARNING: no key found ({where}); the app will fail to authenticate")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--home", default=None, help="CODEX_HOME (default ~/.codex-clone)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("profile")
+    p.add_argument("action", choices=["list", "show", "add", "remove"])
+    p.add_argument("name", nargs="?")
+    p.add_argument("--base-url")
+    p.add_argument("--key-env")
+    p.add_argument("--token-stdin", action="store_true",
+                   help="read the key from stdin and store it INLINE (mode 600)")
+    p.add_argument("--provider-id")
+    p.add_argument("--model", default="")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_profile)
+
+    q = sub.add_parser("pick")
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(fn=cmd_pick)
+
+    r = sub.add_parser("apply")
+    r.add_argument("target", help="<profile>:<model>")
+    r.set_defaults(fn=cmd_apply)
+
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

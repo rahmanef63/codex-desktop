@@ -32,6 +32,7 @@ does not run a local agent. Same scope, different techstack, deliberately.
 | `scripts/mcp_echo.py` | Harmless MCP server used to prove MCP survives the gateway path. |
 | `docs/PROGRESS.md` | Working notes: what is proven, what is not, and every trap that cost time. |
 | `parity-evidence/capability-matrix.txt` | The measured capability matrix and the root cause behind each verdict. |
+| `docs/MACOS.md` | What runs on macOS, what refuses and why, and the unsigned-build/Gatekeeper consequence. |
 
 `docs/PROGRESS.md` is the entry point. It is a working document, not marketing: it records
 failures and dead ends as carefully as successes.
@@ -125,6 +126,12 @@ as PASS while the file still said `OLD`; every assertion since then has been a f
 - Node **24.22.2** for the reverse-engineering helper scripts; older versions fail on syntax the
   bundled code uses.
 - Python 3.12 for `scripts/*.py`.
+
+### macOS
+
+Two scripts are portable (`bin/codex-byok`, `bin/codex-version-drift`); everything that measures
+the app is not, because there is no MSIX and no `powershell.exe`. `docs/MACOS.md` lists exactly
+what works, what refuses, and the Gatekeeper consequence of the unsigned build.
 
 ## Licence
 

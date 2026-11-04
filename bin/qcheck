@@ -11,6 +11,21 @@ set -uo pipefail
 WHICH="${1:-both}"
 [ $# -gt 0 ] && shift
 
+# This wrapper drives the Windows-only probes (codex-real-quicktest, codex-caps-quicktest,
+# isolation-check) and the MSIX install they measure. On a non-Windows host every one of them
+# would either fail or, worse, report a PASS that measured nothing. Refuse instead.
+#
+# `uname -s` rather than `$OSTYPE`: uname exists on macOS, Linux and in WSL (where it says
+# "Linux", which is correct — this is the WSL side and the Windows probes are reachable).
+case "$(uname -s 2>/dev/null)" in
+Darwin)
+	printf 'qcheck: this runs the Windows probes; on macOS there is no MSIX to measure.\n' >&2
+	printf '        What does work on macOS: bin/codex-byok, bin/codex-version-drift.\n' >&2
+	printf '        See docs/MACOS.md.\n' >&2
+	exit 2
+	;;
+esac
+
 run_clone=1
 run_codex=1
 case "$WHICH" in
@@ -46,9 +61,16 @@ fi
 
 if [ "$run_codex" -eq 1 ]; then
 	printf '\n########## codex real (chatgpt vs 9router) ##########\n'
-	# Run from a scratch dir: ~/.codex/config.toml must not leak in as project config.
-	mkdir -p /mnt/c/Users/rahma/Documents/probe
-	if WORKDIR='C:\Users\rahma\Documents\probe' codex-real-quicktest; then codex_state="ok"; else
+	# The probe dir is Windows-side on purpose: the exe reads it as a Windows path. Override
+	# WORKDIR/QCHECK_DIR on any other layout. `mkdir -p` on a missing /mnt/c just succeeds
+	# silently, which would turn a measurement into a no-op PASS.
+	QCHECK_DIR="${QCHECK_DIR:-/mnt/c/Users/rahma/Documents/probe}"
+	QCHECK_WIN="${QCHECK_WIN:-C:\\Users\\rahma\\Documents\\probe}"
+	if ! mkdir -p "$QCHECK_DIR" 2>/dev/null; then
+		printf '  FAIL  cannot create %s — set QCHECK_DIR\n' "$QCHECK_DIR" >&2
+		codex_state="FAILED"
+		codex_rc=1
+	elif WORKDIR="$QCHECK_WIN" codex-real-quicktest; then codex_state="ok"; else
 		codex_state="FAILED"
 		codex_rc=1
 	fi

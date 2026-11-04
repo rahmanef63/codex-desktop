@@ -1,0 +1,26 @@
+{
+  "name": "codex-byok-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "One window over the Codex BYOK profiles and the version-drift report. No agent, no account, no telemetry.",
+  "main": "src/main.mjs",
+  "author": {
+    "name": "Rahman",
+    "email": "rahmanef63@gmail.com"
+  },
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check src/main.mjs && node --check src/preload.cjs && node --check tests/run-tests.mjs && node --check tests/build-config.mjs",
+    "test": "node tests/run-tests.mjs",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win --x64",
+    "dist:mac": "electron-builder --mac --arm64 --x64"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.17.0"
+  }
+}

@@ -52,17 +52,36 @@ EOF
 	exit 2
 }
 
-# The script's single write must not be aimable at the home it protects. `realpath -m` resolves
-# symlinks and `..` without requiring the path to exist, so a traversal or a symlinked directory
-# is caught before anything is created. Returns 1 and prints the offending path when refused.
+# The script's single write must not be aimable at the home it protects. The path is
+# resolved with realpath semantics — symlinks and `..` followed, path need not exist — so a
+# traversal or a symlinked directory is caught before anything is created. Returns 1 and
+# prints the offending path when refused.
+#
+# `realpath -m` is GNU. BSD realpath (macOS 13+) has no `-m`, and macOS 12 has no realpath at
+# all, so it is not called. `cd -P` + the shell's `$PWD` does the same job with POSIX builtins
+# and needs no external command on any platform.
+resolve_path() { # resolve_path <path> -> absolute, symlinks and .. resolved, need not exist
+	local p="$1" dir base
+	# Split into the longest existing prefix and whatever does not exist yet.
+	base=""
+	while [ ! -d "$p" ]; do
+		base="$(basename -- "$p")${base:+/$base}"
+		p="$(dirname -- "$p")"
+		# Guard against dirname reaching "/" and looping forever.
+		[ "$p" = "/" ] && break
+	done
+	dir=$(cd -P -- "$p" 2>/dev/null && pwd -P) || return 1
+	printf '%s%s\n' "${dir%/}" "${base:+/$base}"
+}
+
 guard_snapshot_path() {
-	local target root resolved r
-	target=$(realpath -m -- "$SNAPSHOT_FILE" 2>/dev/null) || {
+	local target root resolved
+	target=$(resolve_path "$SNAPSHOT_FILE") || {
 		printf '  FAIL  SNAPSHOT_FILE is not a usable path: %s\n' "$SNAPSHOT_FILE" >&2
 		return 1
 	}
 	for root in "$REAL" "$CLONE" "$PROBE"; do
-		resolved=$(realpath -m -- "$root" 2>/dev/null) || continue
+		resolved=$(resolve_path "$root") || continue
 		[ -n "$resolved" ] || continue
 		# Compare with a trailing slash so `.codex-backup` is not treated as inside `.codex`.
 		case "$target/" in
@@ -91,7 +110,16 @@ count_sessions() {
 md5_of() {
 	[ -f "$1" ] || return 1
 	local h
-	h=$(md5sum "$1" 2>/dev/null | cut -d' ' -f1) || return 1
+	# md5sum is GNU (Linux/WSL only); macOS ships `md5 -q`. Try both rather than adding a
+	# coreutils dependency. Neither present -> return 1, which the caller reports as
+	# "cannot read", not as "unchanged".
+	if command -v md5sum >/dev/null 2>&1; then
+		h=$(md5sum "$1" 2>/dev/null | cut -d' ' -f1)
+	elif command -v md5 >/dev/null 2>&1; then
+		h=$(md5 -q "$1" 2>/dev/null)
+	else
+		return 1
+	fi
 	[ -n "$h" ] || return 1
 	printf '%s\n' "$h"
 }
@@ -108,7 +136,7 @@ list_pids() {
 	out=$(powershell.exe -NoProfile -Command \
 		"Get-Process | Where-Object {\$_.ProcessName -match '$PROC_RE'} | ForEach-Object { \"\$(\$_.Id)\`t\$(\$_.ProcessName)\" }" \
 		2>/dev/null) || return 1
-	printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+\s' | sort -n -u -k1,1
+	printf '%s\n' "$out" | tr -d '\r' | grep -E '^[0-9]+[[:space:]]' | sort -n -u -k1,1
 	return 0
 }
 
@@ -159,7 +187,7 @@ cmd_snapshot() {
 		printf 'md5\t.codex/config.toml\t%s\n' "$md5_cfg"
 		printf 'md5\t.codex/auth.json\t%s\n' "$md5_auth"
 		# `pid<TAB>number<TAB>name` — the name lets verify tell a recycled renderer from a dead app.
-		printf '%s\n' "$pids" | grep -E '^[0-9]+\s' | awk -F'\t' '{ printf "pid\t%s\t%s\n", $1, $2 }'
+		printf '%s\n' "$pids" | grep -E '^[0-9]+[[:space:]]' | awk -F'\t' '{ printf "pid\t%s\t%s\n", $1, $2 }'
 	} >"$SNAPSHOT_FILE" || {
 		bad "cannot write $SNAPSHOT_FILE"
 		summary
@@ -168,7 +196,7 @@ cmd_snapshot() {
 	info "real home sessions: $n_real"
 	info "clone home sessions: $n_clone"
 	info "probe home sessions: $n_probe (allowed to grow)"
-	info "pre-existing PIDs recorded: $(printf '%s\n' "$pids" | grep -cE '^[0-9]+\s')"
+	info "pre-existing PIDs recorded: $(printf '%s\n' "$pids" | grep -cE '^[0-9]+[[:space:]]')"
 	ok "snapshot written to $SNAPSHOT_FILE"
 	summary
 }

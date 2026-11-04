@@ -1,0 +1,111 @@
+appId: dev.manef.codex-byok
+productName: Codex BYOK
+
+copyright: Copyright © 2026 Rahman
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - src/**/*
+  - package.json
+
+# The scripts live OUTSIDE the asar, because they are executed as ordinary processes.
+# Packing them into app.asar would make them unexecutable. `codex-byok` is already
+# cross-platform; `codex-version-drift` degrades to "not measurable" where there is no
+# MSIX (macOS), which is what makes this bundle launchable on both platforms.
+extraResources:
+  - from: ../../bin/codex-byok
+    to: bin/codex-byok
+  - from: ../../bin/codex-version-drift
+    to: bin/codex-version-drift
+
+asar: true
+
+# ---------------------------------------------------------------------------- Windows
+win:
+  target:
+    - target: nsis
+      # x64 only: Electron 44 dropped ia32 entirely (ia32 needs electron <= 43), and the
+      # install this tooling drives is the x64 MSIX. An arm64 Windows box runs this x64
+      # build under emulation, which is fine for a two-script window.
+      arch: [x64]
+  # UNSIGNED ON PURPOSE. A code-signing certificate costs money every year and the user
+  # asked to avoid anything paid. `signExecutable: false` skips the signature only —
+  # electron-builder still runs rcedit, so icon and version metadata stay in the exe.
+  # (Do NOT switch this to `signAndEditExecutable: false`: that also drops the icon and
+  # the copyright fields, see electron-builder issue #9030.) Consequence: Windows
+  # SmartScreen shows "unrecognised app" on first run. That is the price, not a defect.
+  signExecutable: false
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Codex BYOK
+  deleteAppDataOnUninstall: false
+
+# ------------------------------------------------------------------------------ macOS
+#
+# THIS BUILD IS UNSIGNED AND UNNOTARIZED.
+#
+#   * `identity: null` — electron-builder does not look for a certificate in the keychain
+#     and does not sign anything. Nothing here is faked: there is no signature at all.
+#   * `notarize: false` — no Apple ID, no App Store Connect API key, no $99/yr Developer
+#     Program membership. Nothing is uploaded to Apple.
+#   * `hardenedRuntime: false` — Hardened Runtime is a notarization prerequisite and, on a
+#     bundle with no signature, it can stop the app from launching at all.
+#
+# WHAT THAT COSTS THE USER. The downloaded .dmg carries a quarantine flag, so Gatekeeper
+# blocks the first launch ("cannot be opened because the developer cannot be verified").
+# The one command that allows it on that machine is:
+#
+#     xattr -dr com.apple.quarantine "/Applications/Codex BYOK.app"
+#
+#   ...or right-click the app -> Open -> Open, which does the same thing via the UI.
+#
+# Read that as a PER-MACHINE OVERRIDE, NOT A FIX. It removes the download flag from that
+# one copy on that one machine. It does not sign the app, does not satisfy Gatekeeper for
+# anyone else, does not survive a re-download, and does not stop the block on a second Mac.
+# There is no way around the underlying cost except buying a Developer ID certificate.
+#
+# One more honest caveat: on Apple Silicon the kernel refuses to execute arm64 binaries
+# that carry no signature whatsoever, so the arm64 artifact may be killed on launch even
+# after the quarantine flag is gone. The free escape hatch — NOT enabled here — is an
+# ad-hoc signature, which needs no Apple certificate and no money but still leaves the
+# Gatekeeper block for other machines:
+#
+#     electron-builder --mac -c.mac.identity=- -c.mac.hardenedRuntime=false
+#
+# Verify locally with `codesign -dv "dist/mac-arm64/Codex BYOK.app"` before believing
+# either build runs.
+mac:
+  category: public.app-category.developer-tools
+  identity: null
+  notarize: false
+  hardenedRuntime: false
+  # Skips the post-sign assessment step, which cannot pass without a signature.
+  gatekeeperAssess: false
+  target:
+    # Two separate per-arch artifacts, not a universal binary: there is no native module
+    # to rebuild and no @electron/universal merge step to debug, and each download is
+    # half the size. arm64 covers every Apple Silicon Mac (all models since 2020); x64
+    # covers Intel Macs and also runs on Apple Silicon through Rosetta.
+    - target: dmg
+      arch: [arm64, x64]
+    # zip as well, because Squirrel.Mac/electron-updater requires the pair. This build
+    # does not use auto-update (an unsigned bundle cannot), but the zip is the cheapest
+    # way to hand someone the .app without mounting a dmg.
+    - target: zip
+      arch: [arm64, x64]
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.dmg
+
+# No `icon` keys: this branch carries no build/ assets, and pointing at a missing
+# build/icon.icns fails the build outright. electron-builder falls back to the default
+# Electron icon and warns. Add `build/icon.icns` (and `build/icon.ico` for win) when there
+# is artwork, then set `mac.icon` / `win.icon`.
