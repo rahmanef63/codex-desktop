@@ -159,14 +159,20 @@ fi
 
 # ---------------------------------------------------------------- 8. CLI path translation
 # The quicktest used to hardcode a content-addressed MSIX path that disappears on every
-# update. It must resolve, and the result must be a Windows path PowerShell can execute.
-resolved=$(bash -c "source <(sed -n '/^find_codex_exe/,/^}/p' '$BIN/codex-real-quicktest'); find_codex_exe" 2>/dev/null)
+# update. The resolver now lives in bin/codex-exe (one copy, two probes); assert that it
+# prints a path PowerShell can actually execute, not a WSL one.
+resolved=$("$BIN/codex-exe" 2>/dev/null)
+code=$?
 case "$resolved" in
 C:\\*)
 	ok "codex.exe resolved to a Windows path"
 	;;
 "")
-	printf '  SKIP  codex.exe resolution (no Windows app on this host)\n'
+	if [ "$code" = "2" ]; then
+		printf '  SKIP  codex.exe resolution (no Windows app on this host)\n'
+	else
+		bad "codex.exe resolver exited $code with no output"
+	fi
 	;;
 *)
 	bad "codex.exe resolved to a Windows path (got '$resolved')"

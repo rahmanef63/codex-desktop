@@ -1110,3 +1110,68 @@ baru `model_instructions_file`.
 | catalog | 99 model, trunc 40.000, verbosity medium, 3 `oc/*` disembunyikan | `nine-router-models.json` (asli & klon identik) |
 | suite | 8/8 (`run-tests`), 12 (`isolation`), 11 (`instruct`), 11 (`shortcut`) | dijalankan |
 | `qcheck codex` | 5 passed + 22 passed, 0 failed | dijalankan lewat symlink dari `/tmp` |
+
+## 13. Gateway mati = "model rusak", dan tidak ada yang mengatakannya (2026-11-05)
+
+### Gejalanya
+
+Setelah default dipindah ke deepseek, `~/.9router` dikarantina ke
+`~/.local/share/9router-cleanup-20261105/` (16:56) dan port 20128 tutup. Semua model di
+profil `nine_router` jadi tidak menjawab, dengan gejala yang sama persis untuk semuanya:
+
+```
+ERROR: Reconnecting... 1/5
+ERROR: Reconnecting... waiting for network
+```
+
+Tidak ada satu pun pesan yang menyebut gateway. Yang disalahkan model.
+
+### Kesalahan yang terjadi karena itu
+
+`ctx/ollama/deepseek-v4.1-flash:1017-cloud` diuji saat gateway mati, gagal, lalu dicap
+"tidak bisa dipakai". Pengukuran itu **tidak sah** — bukan modelnya yang menolak, tapi tidak
+ada yang mendengarkan di port itu. Sampai sekarang model itu **belum pernah benar-benar
+diukur**; jangan mengutip verdict apa pun tentangnya.
+
+### Dua klaim pengguna, keduanya benar
+
+| klaim | bukti |
+| --- | --- |
+| "semua default itu deepseek 1017" | `~/.codex-clone/config.toml` memang `ctx/ollama/deepseek-v4.1-flash:1017-cloud`, bukan default repo — sisa seed lama sebelum `model_instructions_file` ada |
+| "tidak ada fallbacknya" | `combos` di gateway: slug `deepseek-v4.1-flash-free` **adalah** combo → `["ctx/ollama/deepseek-v4.1-flash:cloud","ag/gemini-3.8-flash","cx/gpt-6.1-sol"]`. `ctx/...:1017-cloud` dan `oc/...` **bukan** combo, jadi tidak punya rantai fallback sama sekali |
+
+Jadi fallback itu milik *slug polos*, bukan milik model. Menulis slug `ctx/...` atau `oc/...`
+ke profil membuang rantai fallback yang sudah ada di gateway.
+
+### Perbaikan
+
+1. **Clone dikembalikan ke slug polos**: `model = "deepseek-v4.1-flash-free"`, sama dengan
+   profil utama. Fallback gateway jadi berlaku lagi.
+2. **Launcher punya preflight** (`Test-GatewayReachable`): provider loopback diprobe sebelum
+   window dibuka. Kalau tidak menjawab:
+
+   ```
+   gateway not answering: http://127.0.0.1:20128/v1
+     nothing that needs nine_router would answer; the model is not the problem.
+     start it:  9router start          (or: systemctl --user start 9router)
+     use the real account instead:  codex-launch.ps1 -Mode real
+   ```
+
+   Aturannya sengaja konservatif: **hanya loopback** yang diprobe. Provider remote tidak
+   pernah diprobe — outage remote bukan sesuatu yang bisa diperbaiki skrip ini, dan verdict
+   yang salah di sana akan memblokir launch yang sebenarnya jalan. `-Mode real` tidak
+   tersentuh (diverifikasi: tetap membuka `CODEX_HOME=C:\Users\rahma\.codex`).
+
+### Bug yang ditemukan oleh tesnya sendiri
+
+Versi pertama preflight memperlakukan `WebException` sebagai "mati". Sebuah TCP listener yang
+mendengar tapi tidak berbicara HTTP juga melempar itu — jadi gateway yang hidup akan dilaporkan
+mati dan **setiap launch diblokir**. `test-gateway-preflight.ps1` menangkapnya dengan listener
+mentah di port 20998. Sekarang: ada respons HTTP → hidup; connect berhasil → hidup; hanya
+kegagalan connect yang dihitung mati.
+
+### Batas
+
+- Preflight memeriksa "ada yang mendengarkan", bukan "model ini dilayani". Model yang tidak
+  ada di `/v1/models` tetap lolos preflight dan tetap gagal di app. Itu tugas `codex-doctor`.
+- Gateway bisa hidup lalu mati di tengah sesi. Preflight tidak menolong kasus itu.

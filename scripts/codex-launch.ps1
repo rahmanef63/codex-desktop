@@ -230,6 +230,59 @@ function Set-ClonePluginDisabled($configPath, $pluginId) {
     Write-Host "plugins.$pluginId disabled (added)"
 }
 
+function Test-GatewayReachable($baseUrl, $timeoutSec = 5) {
+    # A profile whose provider lives on a local gateway opens a window that says
+    # "Reconnecting..." forever and answers nothing. That is indistinguishable from a broken
+    # model, and on 2026-11-05 it cost an afternoon: the gateway was down and the model got
+    # blamed (`ctx/...:1017-cloud` looked dead; it had never been tested).
+    #
+    # Only loopback is probed. A remote provider is reachable or not for reasons this script
+    # cannot fix, and a wrong guess there would block a launch that actually works.
+    if (-not $baseUrl) { return $true }
+    $u = $null
+    if (-not [System.Uri]::TryCreate($baseUrl, [System.UriKind]::Absolute, [ref]$u)) { return $true }
+    if ($u.Host -notin @('127.0.0.1', 'localhost', '::1', '[::1]')) { return $true }
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($u.GetLeftPart([System.UriPartial]::Authority) + '/v1/models')
+        $req.Timeout = $timeoutSec * 1000
+        $req.ReadWriteTimeout = $timeoutSec * 1000
+        $req.Method = 'GET'
+        $resp = $req.GetResponse()
+        $resp.Close()
+        return $true
+    } catch [System.Net.WebException] {
+        $r = $_.Exception.Response
+        # Any HTTP response means something IS listening; only a transport failure is "down".
+        if ($r -and [int]$r.StatusCode -gt 0) { return $true }
+        # A raw TCP listener that never speaks HTTP also throws here. Distinguish it from a
+        # closed port: a closed port fails at connect, a dumb listener fails at read.
+        $sock = New-Object System.Net.Sockets.TcpClient
+        try {
+            $conn = $sock.BeginConnect($u.Host, $u.Port, $null, $null)
+            if (-not $conn.AsyncWaitHandle.WaitOne($timeoutSec * 1000)) { return $false }
+            $sock.EndConnect($conn)
+            return $true
+        } catch {
+            return $false
+        } finally {
+            $sock.Close()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Get-ProfileBaseUrl($profilePath) {
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $raw = [System.IO.File]::ReadAllText($profilePath, $utf8)
+    $provider = [regex]::Match($raw, '(?m)^\s*model_provider\s*=\s*"([^"]+)"')
+    if (-not $provider.Success) { return $null }
+    $table = [regex]::Escape($provider.Groups[1].Value)
+    $base = [regex]::Match($raw, '(?m)^\s*base_url\s*=\s*"([^"]+)"')
+    if ($base.Success) { return $base.Groups[1].Value }
+    return $null
+}
+
 function Copy-Tree($source, $destination) {
     if (-not (Test-Path -LiteralPath $source)) {
         Write-Host "skip (source missing): $source"
@@ -320,6 +373,24 @@ if ($Mode -eq 'clone') {
         # unstable on images (1/3) and cost more tokens for the same answer.
         # `-Model ...` still overrides this for one launch.
         Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'deepseek-v4.1-flash-free' }) 'nine_router'
+    }
+
+    # Preflight: never open a window that cannot answer. The gateway is a separate process on
+    # this machine and it can be down (measured 2026-11-05: ~/.9router quarantined, port 20128
+    # closed, every model "broken"). Refusing here turns a silent hang into one sentence and a
+    # command that starts the thing.
+    $probeSource = if ($Profile) { Join-Path $cloneHome ($Profile + '.config.toml') } else { $targetConfig }
+    $probeBase = Get-ProfileBaseUrl $probeSource
+    if (-not (Test-GatewayReachable $probeBase)) {
+        $port = 20128
+        if ($probeBase -match ':(\d+)') { $port = [int]$Matches[1] }
+        Write-Host ''
+        Write-Host "gateway not answering: $probeBase" -ForegroundColor Red
+        Write-Host "  nothing that needs nine_router would answer; the model is not the problem."
+        Write-Host "  start it:  9router start          (or: systemctl --user start 9router)"
+        Write-Host "  use the real account instead:  codex-launch.ps1 -Mode real"
+        Write-Host "  or pick a provider that does not use the gateway: -Profile <name>"
+        throw "gateway unreachable on port $port"
     }
 
     # Catalog: the clone must read its own copy, not the real home's. Refresh it when the real
