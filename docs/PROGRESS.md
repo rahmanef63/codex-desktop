@@ -1530,3 +1530,57 @@ keputusan, karena memory punya fungsi nyata sedangkan Linear tidak.
 
 `app/tests/run-tests.mjs` **13/13**; klon menjalankan 5 shell call terpisah dengan benar pada
 model 1017; `bin/codex-doctor --home ~/.codex-clone` PASS + INFO fallback.
+
+## 22. Plugin/MCP cuma dipanggil kalau disebut (2026-11-06)
+
+Aturan pemilik: *"hanya panggil plugin atau mcp kalau memang di mention atau disebutkan"*.
+
+### Kenapa ini bukan sekadar aturan perilaku
+
+Ini soal biaya. Permukaan tool sebuah plugin **disuntik ke deskripsi tool `exec`** dan dikirim
+ulang tiap turn. Dua kali diukur dari request body asli, bukan dari dokumentasi:
+
+| plugin aktif | floor `say` turn |
+| --- | --- |
+| linear saja | 38.779 token |
+| linear mati | 18.150 |
+| + computer-use, chrome/browser, codex-app-tools mati | **15.870** |
+
+`mcp__cua_repl` sendiri 6.601 byte / ~1.650 token per turn; `exec` juga menyuntik bagian
+`mcp__node_repl`. Menghapus blok `[mcp_servers.node_repl]` dari config **tidak** menghilangkan
+`cua_repl` — datangnya dari plugin, bukan dari config. Jadi yang dimatikan adalah pluginnya.
+
+### Yang diterapkan
+
+1. `scripts/clone-AGENTS.md` dapat bagian **Plugins and MCP**: jangan panggil `mcp__*`
+   spekulatif, jangan buka plugin yang tidak disebut, utamakan shell, sebut namanya kalau
+   memang butuh lalu jalan tanpa itu.
+2. `codex-launch.ps1` mematikan 5 plugin tiap run klon: `linear@openai-api-curated`,
+   `unified-computer-use`, `computer-use`, `codex-app-tools`, `browser` (semua `@openai-bundled`),
+   plus `chrome@openai-bundled` yang sudah lebih dulu.
+3. `app/tests/test-plugin-off.ps1` menuntut kelimanya tetap di daftar.
+
+### Yang hilang, dan kenapa itu tidak masalah di sini
+
+Browser in-app, kontrol Chrome, computer use, dan API thread codex-app-tools. Ketiganya memang
+tidak pernah bekerja di klon ini: browser butuh app host (PROGRESS 13), computer use butuh
+allowlist per-app yang diputuskan di UI ChatGPT. Shell adalah jalur yang didukung.
+
+Real home (ChatGPT asli) **tidak disentuh** — semua perubahan hanya di klon.
+
+### Verifikasi perilaku, bukan cuma config
+
+Sesi nyata setelah perubahan: hanya **satu** tool call, `exec`. Nol `mcp__*`. Floor per-turn
+15.870 token (input 9.480 + tools 6.389).
+
+### Sisa lantai
+
+| komponen | token |
+| --- | --- |
+| base prompt Codex | ~5.381 |
+| memory block | ~2.216 |
+| tools (exec/wait/collab/request_user_input) | ~6.389 |
+| skills + AGENTS.md | ~2.000 |
+
+Memory masih aktif. Mematikannya hemat ~2.216 token/turn lagi, tapi belum diterapkan —
+menunggu keputusan.

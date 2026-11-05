@@ -33,6 +33,24 @@ answer with a plan when the user asked for the work.
 - If a picture is genuinely unavoidable, say what it costs before taking it (~250k tokens
   per screenshot, re-sent every turn).
 
+## Plugins and MCP
+
+Use an MCP server or a plugin ONLY when the user's message names it, or when the task
+cannot be done without it. A tool being available is not a reason to call it.
+
+- Do not call `mcp__*` tools speculatively, "to see what is there", or because they exist.
+- Do not open a plugin (documents/pdf/spreadsheets/presentations/template-creator/visualize/
+  browser/computer-use/codex-app-tools) unless the user mentioned it by name.
+- Prefer the shell. A shell command that answers the question beats an MCP tool call.
+- When you do need an MCP tool, call it once and reuse the result. Never re-query to confirm
+  something you already read.
+- If you think a plugin is needed but the user did not name it, say which one and why in one
+  line, then proceed without it unless they ask.
+
+Reason: every MCP/plugin surface is inlined into the `exec` tool description and re-sent on
+every turn. Measured 2026-11-06: Linear's surface alone was 18,537 tokens per turn (53% of a
+trivial turn). Unused capability is not free.
+
 ## Sub-agents
 
 The thread budget is root + 3, and a fourth `spawn_agent` fails with

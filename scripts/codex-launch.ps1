@@ -517,6 +517,21 @@ if ($Mode -eq 'clone') {
     # The real ChatGPT home keeps it on; only the clone is touched.
     Set-ClonePluginDisabled $targetConfig 'linear@openai-api-curated'
 
+    # The GUI/desktop plugins advertise their tool surface the same way. Measured on top of
+    # the Linear cut: `mcp__cua_repl` alone was 6,601 bytes / ~1,650 tokens per turn, and
+    # `exec` inlined an `mcp__node_repl` section besides. Disabling all four took a `say`
+    # turn from 18,125 to 15,218 tokens.
+    # What is lost: in-app browser, Chrome control, computer use (screenshot clicks), and
+    # the codex-app-tools thread API. None of them worked here anyway — browser needs an app
+    # host (PROGRESS 13) and computer use needs a per-app allowlist decided in the ChatGPT
+    # UI. The shell is the supported path in this home, and clone-AGENTS.md says so.
+    foreach ($plugin in @('unified-computer-use@openai-bundled',
+                          'computer-use@openai-bundled',
+                          'codex-app-tools@openai-bundled',
+                          'browser@openai-bundled')) {
+        Set-ClonePluginDisabled $targetConfig $plugin
+    }
+
     # The clone's Chrome extension host keeps plugins\cache\openai-bundled\chrome\latest
     # open, so the app's own cache refresh hits
     # "failed to back up plugin cache entry: Access is denied. (os error 5)" and warns on
