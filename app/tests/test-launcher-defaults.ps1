@@ -15,20 +15,22 @@ $allowed = $modeParam.Attributes | Where-Object { $_.TypeName.Name -eq 'Validate
 $values = @($allowed.PositionalArguments | ForEach-Object { $_.Value })
 if ($values -notcontains 'real') { throw '-Mode real is no longer accepted; the ChatGPT account must stay reachable' }
 
-# The clone branch must pin a COMBO slug, never a bare upstream one: only a combo has a
-# fallback chain, and a bare ctx/* has zero prompt cache (measured 2026-11-06). The specific
-# combo is a policy choice; what must not change is that it is a combo.
+# The clone branch must pin exactly the model the owner chose: Ollama Cloud DeepSeek V4.1
+# Flash (1017) on the VPS gateway. This is a bare upstream slug, not a combo, which was an
+# explicit policy decision -- the cost (no prompt cache, so no fallback chain either) is
+# documented in codex-launch.ps1 and PROGRESS §20. The test pins the decision so a later
+# edit cannot silently move the default back without saying so.
 $text = [System.IO.File]::ReadAllText($launcher)
-if ($text -notmatch "else\s*\{\s*'([a-z0-9.\-]+)'\s*\}\s*\)\s*'nine_router'") {
+if ($text -notmatch "else\s*\{\s*'([^']+)'\s*\}\s*\)\s*'nine_router'") {
     throw 'clone branch no longer pins a default model'
 }
 $defaultModel = $Matches[1]
-if ($defaultModel -match '^(ctx|oc|ag|cx)/') {
-    throw "clone default is a bare upstream slug ($defaultModel); only a combo has a fallback chain"
+if ($defaultModel -ne 'ctx/ollama/deepseek-v4.1-flash:1017-cloud') {
+    throw "clone default is '$defaultModel', expected ctx/ollama/deepseek-v4.1-flash:1017-cloud"
 }
 if ($text -match "else\s*\{\s*'oc/deepseek") { throw 'clone default points at oc/*, which cannot connect through Codex' }
 
 "-Mode default: clone (BYOK) - PASS"
 "real mode still reachable - PASS"
-"clone model default: $defaultModel (combo) - PASS"
+"clone model default: $defaultModel - PASS"
 'launcher-defaults: 3/3 PASS'

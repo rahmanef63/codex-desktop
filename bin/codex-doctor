@@ -199,13 +199,19 @@ def check_endpoint(home, names, fast):
     if model and ids and model not in ids:
         record("model", False, "%s is not served" % model,
                "bin/codex-byok --home %s pick" % home)
-    elif model and ids and combos and model not in combos:
-        # Bare upstream slug has no fallback chain and fails on first error.
-        combo_hint = "deepseek-v4.1-flash-free" if "deepseek-v4.1-flash-free" in combos else next(iter(sorted(combos)), "a combo")
-        record("model", False, "%s (no fallback chain)" % model,
-               "switch to combo %s; bare upstream slug dies on first error" % combo_hint)
-    elif model:
+        return
+    if model:
         record("model", True, model)
+    if model and ids and combos and model not in combos:
+        # A bare upstream slug is a legitimate choice (the owner pinned one on 2026-11-06), so
+        # this is INFO, not a failure: the launch works. What must not be silent is the price.
+        # No chain means the first upstream error ends the turn; no cache means the whole
+        # prefix is re-billed every turn.
+        combo_hint = ("cache-first" if "cache-first" in combos
+                      else next(iter(sorted(combos)), "a combo"))
+        record("fallback", None, "%s is a bare upstream slug" % model,
+               "no fallback chain and no prompt cache; %s measured 84-92%% cache on the "
+               "same task" % combo_hint)
 
 
 def check_catalog(home):

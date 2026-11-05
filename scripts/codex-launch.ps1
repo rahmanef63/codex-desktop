@@ -405,22 +405,16 @@ if ($Mode -eq 'clone') {
         }
         Write-Host "using BYOK profile: $Profile$(if ($Model) { ' (model override: ' + $Model + ')' })"
     } else {
-        # Default clone model: the cache-first combo. Combo slugs are the only ones with a
-        # fallback chain, and this one is ordered so the cheap-to-reuse upstream comes first.
+        # Pinned by explicit owner decision 2026-11-06: Ollama Cloud DeepSeek V4.1 Flash (1017)
+        # through the VPS/SSoT gateway. `-Model ...` still overrides this for one launch.
         #
-        # Why cache decides the default (measured 2026-11-06, two runs each, same 11-step task):
-        #   cx/gpt-6.1-sol      84.4% and 91.9% of input billed as cache hits
-        #   deepseek-v4.1-flash-free   0.0% and 0.0%
-        # With cache priced at a tenth of fresh input, the cx run costs ~17% of what the
-        # deepseek run costs for the same work, even though its RAW token count is HIGHER
-        # (216k vs 155k). Raw tokens are the wrong target.
-        # The deepseek combo starts with ctx/ollama/..., and every ctx/* upstream reports
-        # zero cache, so the entire prefix is re-billed on every turn.
-        # Also measured: cx tokenises the same payload smaller (7490 vs 9824 tokens for an
-        # identical 25,000-char body).
-        # plain `oc/deepseek-v4.1-flash-free` never connects through the Codex path, which is
-        # why oc/* is hidden in the catalog. `-Model ...` still overrides this for one launch.
-        Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'cache-first' }) 'nine_router'
+        # Measured cost of this choice, so nobody has to rediscover it: this slug is a bare
+        # upstream (owned_by "ctx"), NOT a combo, and every ctx/* upstream reports zero prompt
+        # cache. Session logs for it: 136 turns, 24,293,175 input tokens, 0 cached. The
+        # cache-first combo measured 84-92% cache on the same 11-step task. Cached input bills
+        # at roughly a tenth of fresh input, so the same work costs several times more here.
+        # This is a deliberate policy override, not an oversight.
+        Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'ctx/ollama/deepseek-v4.1-flash:1017-cloud' }) 'nine_router'
     }
 
     # Preflight: never open a window that cannot answer. The gateway is a separate process on
@@ -513,6 +507,15 @@ if ($Mode -eq 'clone') {
     # Measured: real home 0 occurrences, clone 15. With the plugin off, 0 in 638 log lines.
     # The real account keeps it enabled; this only ever rewrites the clone config.
     Set-ClonePluginDisabled $targetConfig 'chrome@openai-bundled'
+
+    # linear@openai-api-curated leaks its whole MCP tool surface into the `exec` tool
+    # description: 60+ tools, 74,150 characters, ~18,537 tokens — re-sent on EVERY turn.
+    # Measured 2026-11-06 by capturing the exact request body: with linear enabled the
+    # `exec` tool was 93,960 bytes and a trivial `say OK` turn cost 38,779 input tokens;
+    # with it disabled `exec` was 17,646 bytes and the same turn cost 18,150. That is a
+    # 53% cut on every single turn of every session, for a plugin this clone never uses.
+    # The real ChatGPT home keeps it on; only the clone is touched.
+    Set-ClonePluginDisabled $targetConfig 'linear@openai-api-curated'
 
     # The clone's Chrome extension host keeps plugins\cache\openai-bundled\chrome\latest
     # open, so the app's own cache refresh hits

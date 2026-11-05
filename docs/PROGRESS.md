@@ -1467,3 +1467,66 @@ Tambahan: `cx` juga memakai tokenizer lebih hemat — payload 25.000 char identi
 `app/tests/run-tests.mjs` **12/12**; `tests/shortcut-contract.sh` 6 PASS;
 `instruct-contract` 12 PASS; `secret-scan` bersih; `codex-doctor` (asli + klon) PASS dengan
 77 model; `codex exec` di klon jalan pada combo `cache-first`.
+
+## 21. Model dipaku ke DeepSeek 1017, dan Linear MCP ternyata 18,5k token/turn (2026-11-06)
+
+Keputusan pemilik: pakai **Ollama Cloud · DeepSeek V4.1 Flash (1017)** lewat gateway VPS/SSOT
+saja — `ctx/ollama/deepseek-v4.1-flash:1017-cloud`. Bukan combo.
+
+### Harga dari keputusan itu, supaya tidak jadi teka-teki nanti
+
+Slug ini `owned_by: "ctx"` — bare upstream, bukan combo. Dua konsekuensi terukur:
+
+| hal | angka |
+| --- | --- |
+| prompt cache | **0%** (136 turn historis, 24.293.175 token input, 0 cached; diukur ulang: tetap 0) |
+| rantai fallback | tidak ada — error pertama mengakhiri turn |
+| tokenizer | lebih mahal: body 25.000 char identik → **10.825** token vs **8.490** di `cx` |
+
+Bandingkan `cache-first` (combo `cx` dulu): 84–92% cache. Dengan cache sepersepuluh harga,
+kerja yang sama di `cx` ~17% biaya `ctx`. Jadi pilihan ini **sengaja** lebih mahal; dicatat
+di `codex-launch.ps1` dan di `bin/codex-doctor` sebagai INFO, bukan FAIL — launchnya jalan,
+yang tidak boleh senyap adalah harganya.
+
+### Temuan besar: `linear@openai-api-curated` menyuntik 18.537 token ke SETIAP turn
+
+Ini bukan soal model. Deskripsi tool `exec` yang dikirim Codex berisi **seluruh permukaan MCP**
+plugin yang aktif. Dengan Linear aktif:
+
+```
+exec tool            93.960 byte
+  mcp__linear        74.150 char  ~18.537 token   (80% dari deskripsi)
+  preamble           15.035 char   ~3.758 token
+  mcp__node_repl      1.888 char     ~472 token
+```
+
+`say OK` biasa = **38.779 token input**. Setelah Linear dimatikan = **18.150 token**.
+**Hemat 53% di setiap turn, setiap sesi**, untuk plugin yang klon ini tidak pakai.
+
+Dibuktikan dari request body asli (proxy capture), bukan dari dugaan: `exec` 93.960 → 17.646
+byte, `linear present: False`.
+
+Sekarang `codex-launch.ps1` mematikan `linear@openai-api-curated` tiap run, dikunci
+`app/tests/test-plugin-off.ps1` (3 assert, termasuk idempoten byte-safe). Real home tidak
+disentuh.
+
+### Sisa lantai biaya klon (setelah Linear mati)
+
+`~18.150 token/turn`, terurai:
+
+| komponen | token |
+| --- | --- |
+| base prompt Codex | ~5.381 |
+| `AGENTS.md` | ~657 |
+| memory block | ~6.061 |
+| skills instructions | ~2.169–3.259 |
+| tools (exec + wait + collab + cua_repl + dll) | ~5.062–8.040 |
+
+Memory dimatikan menghemat ~2,5k (18.150 → 15.646) tapi `AGENTS.md` ikut naik karena versi
+project-scoped memuat lebih banyak, jadi bersihnya ~2,5k saja. **Belum diterapkan** — menunggu
+keputusan, karena memory punya fungsi nyata sedangkan Linear tidak.
+
+### Gate
+
+`app/tests/run-tests.mjs` **13/13**; klon menjalankan 5 shell call terpisah dengan benar pada
+model 1017; `bin/codex-doctor --home ~/.codex-clone` PASS + INFO fallback.
