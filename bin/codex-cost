@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Where do the tokens actually go? Reads Codex session logs and attributes the cost.
+
+The question this answers: a clone session burned 52,287,140 input tokens to produce
+172,503 output tokens. Raw token counts do not say why, and "the context window is too
+big" is not an answer — it is a symptom. This attributes tokens to the things that
+actually caused them:
+
+  * re-send cost   — every retained item is re-sent on every later turn, so its true cost
+                     is (its size) x (turns after it), not its size. This is the quadratic
+                     that makes long sessions expensive, and it is invisible in a raw total.
+  * category       — reasoning traces, tool outputs, tool-call arguments, messages.
+  * cache          — how much input was billed as cache hits. A model with 0% cache pays
+                     full price for the entire re-sent prefix on every single turn.
+  * floor          — the constant per-turn overhead (base prompt + memory + skills +
+                     tools), which is paid again on every turn no matter how short.
+
+Usage:
+  codex-cost                      # newest session in the resolved clone home
+  codex-cost --home DIR           # a specific CODEX_HOME
+  codex-cost --all                # every session, summed
+  codex-cost --top N              # N worst items to list (default 10)
+
+Exit: 0 measured, 2 nothing to measure.
+"""
+import argparse
+import glob
+import json
+import os
+import sys
+
+# An image arrives as input_image. After the 2026-11-06 gateway fix it is billed as a
+# real image; before it, the base64 was billed as text. Either way it is not 4 chars/token.
+IMAGE_TOKEN_COST = 1500
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_home(explicit):
+    if explicit:
+        return explicit
+    sys.path.insert(0, HERE)
+    try:
+        import codex_home as resolver
+        result = resolver.resolve()
+        if result.get('ok'):
+            return result.get('clone') or result.get('real')
+    except Exception:  # noqa: BLE001 - fall through to the conventional path
+        pass
+    for candidate in ('~/.codex-clone', '~/.codex'):
+        path = os.path.expanduser(candidate)
+        if glob.glob(os.path.join(path, 'sessions', '**', '*.jsonl'), recursive=True):
+            return path
+    return None
+
+
+def sessions(home):
+    return sorted(glob.glob(os.path.join(home, 'sessions', '**', '*.jsonl'), recursive=True),
+                  key=os.path.getmtime)
+
+
+# Keys whose values are bookkeeping, not content the model reads. Skipping them by NAME
+# rather than whitelisting content keys is deliberate: a whitelist that hits `content: null`
+# first reports 0 for a reasoning item whose text lives under `summary`, which is exactly
+# the bug that made the first version of this tool claim reasoning was 0% of the cost.
+NOISE_KEYS = {
+    'id', 'type', 'role', 'call_id', 'encrypted_content', 'internal_chat_message_metadata_passthrough',
+    'turn_id', 'created_at', 'create_time', 'metadata', 'annotations', 'logprobs',
+}
+
+
+def text_len(value):
+    """Characters the model actually receives, not JSON transport escaping."""
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        return sum(text_len(v) for v in value)
+    if isinstance(value, dict):
+        return sum(text_len(v) for k, v in value.items() if k not in NOISE_KEYS)
+    return 0
+
+
+def images_in(value):
+    if isinstance(value, str):
+        return value.count('data:image') + (1 if value.startswith('<image') else 0)
+    if isinstance(value, list):
+        return sum(images_in(v) for v in value)
+    if isinstance(value, dict):
+        if value.get('type') in ('input_image', 'image_url'):
+            return 1
+        return sum(images_in(v) for v in value.values())
+    return 0
+
+
+def analyse(path):
+    rows = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    usage_idx = [i for i, r in enumerate(rows) if r.get('type') == 'token_usage_record']
+    model = None
+    for r in rows:
+        if r.get('type') == 'turn_context':
+            model = r['payload'].get('model') or model
+    total_in = total_out = total_cached = 0
+    for i in usage_idx:
+        u = rows[i]['payload']['usage']
+        total_in += u.get('input_tokens', 0)
+        total_out += u.get('output_tokens', 0)
+        total_cached += u.get('cached_input_tokens', 0) or 0
+
+    items = []
+    for i, r in enumerate(rows):
+        if r.get('type') != 'response_item':
+            continue
+        payload = r.get('payload', {})
+        kind = payload.get('type') or '?'
+        chars = text_len(payload)
+        imgs = images_in(payload)
+        tokens = chars / 4 + imgs * IMAGE_TOKEN_COST
+        later = sum(1 for j in usage_idx if j > i)
+        if later and tokens:
+            items.append({'kind': kind, 'tokens': tokens, 'later': later,
+                          'cost': tokens * later, 'line': i})
+
+    return {
+        'turns': len(usage_idx),
+        'total_in': total_in,
+        'total_out': total_out,
+        'cached': total_cached,
+        'model': model,
+        'items': items,
+    }
+
+
+def report(results, label, top):
+    turns = sum(r['turns'] for r in results)
+    total_in = sum(r['total_in'] for r in results)
+    total_out = sum(r['total_out'] for r in results)
+    cached = sum(r['cached'] for r in results)
+    items = [it for r in results for it in r['items']]
+    resend = sum(it['cost'] for it in items)
+
+    print('%s' % label)
+    print('  turns            %s' % f'{turns:,}')
+    print('  input tokens     %s' % f'{total_in:,}')
+    print('  output tokens    %s' % f'{total_out:,}')
+    if total_out:
+        print('  input : output   %.0f : 1' % (total_in / total_out))
+    if total_in:
+        print('  cache hit        %.1f%%  (%s of input billed as cache)'
+              % (cached / total_in * 100, f'{cached:,}'))
+        if cached == 0:
+            print('                   no cache at all: the full prefix is re-billed every turn.')
+    if not total_in:
+        return
+
+    print()
+    print('  re-send cost     %s  (%.0f%% of input)' % (f'{int(resend):,}', resend / total_in * 100))
+    print('                   every retained item is re-sent on each later turn; that is the')
+    print('                   quadratic, and it is why a long session is not linear in turns.')
+
+    by_kind = {}
+    for it in items:
+        by_kind[it['kind']] = by_kind.get(it['kind'], 0) + it['cost']
+    if by_kind:
+        print()
+        print('  BY CATEGORY (share of re-sent tokens)')
+        for kind, cost in sorted(by_kind.items(), key=lambda kv: -kv[1]):
+            print('    %-24s %12s  %5.1f%%' % (kind, f'{int(cost):,}', cost / resend * 100))
+
+    if top > 0 and items:
+        print()
+        print('  WORST SINGLE ITEMS (size x turns re-sent)')
+        print('    %-22s %10s %7s %12s' % ('kind', 'tokens', 'turns', 'cost'))
+        for it in sorted(items, key=lambda x: -x['cost'])[:top]:
+            print('    %-22s %10s %7d %12s' % (
+                it['kind'], f"{int(it['tokens']):,}", it['later'], f"{int(it['cost']):,}"))
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument('--home', default=None)
+    ap.add_argument('--all', action='store_true')
+    ap.add_argument('--top', type=int, default=10)
+    args = ap.parse_args()
+
+    home = resolve_home(args.home)
+    if not home:
+        print('codex-cost: no CODEX_HOME with sessions found; pass --home', file=sys.stderr)
+        return 2
+    files = sessions(home)
+    if not files:
+        print('codex-cost: no sessions in %s' % home, file=sys.stderr)
+        return 2
+
+    if args.all:
+        results = [analyse(f) for f in files]
+        results = [r for r in results if r['turns']]
+        report(results, 'all sessions in %s (%d)' % (home, len(results)), args.top)
+        return 0
+
+    newest = files[-1]
+    r = analyse(newest)
+    if not r['turns']:
+        print('codex-cost: newest session has no usage records yet', file=sys.stderr)
+        return 2
+    report([r], '%s\n  model %s' % (os.path.basename(newest), r['model']), args.top)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -15,14 +15,20 @@ $allowed = $modeParam.Attributes | Where-Object { $_.TypeName.Name -eq 'Validate
 $values = @($allowed.PositionalArguments | ForEach-Object { $_.Value })
 if ($values -notcontains 'real') { throw '-Mode real is no longer accepted; the ChatGPT account must stay reachable' }
 
-# The clone branch must actually pin the deepseek default, not an ctx/* or oc/* copy.
+# The clone branch must pin a COMBO slug, never a bare upstream one: only a combo has a
+# fallback chain, and a bare ctx/* has zero prompt cache (measured 2026-11-06). The specific
+# combo is a policy choice; what must not change is that it is a combo.
 $text = [System.IO.File]::ReadAllText($launcher)
-if ($text -notmatch "else\s*\{\s*'deepseek-v4\.1-flash-free'\s*\}\s*\)\s*'nine_router'") {
-    throw 'clone branch no longer defaults to deepseek-v4.1-flash-free'
+if ($text -notmatch "else\s*\{\s*'([a-z0-9.\-]+)'\s*\}\s*\)\s*'nine_router'") {
+    throw 'clone branch no longer pins a default model'
+}
+$defaultModel = $Matches[1]
+if ($defaultModel -match '^(ctx|oc|ag|cx)/') {
+    throw "clone default is a bare upstream slug ($defaultModel); only a combo has a fallback chain"
 }
 if ($text -match "else\s*\{\s*'oc/deepseek") { throw 'clone default points at oc/*, which cannot connect through Codex' }
 
 "-Mode default: clone (BYOK) - PASS"
 "real mode still reachable - PASS"
-"clone model default: deepseek-v4.1-flash-free - PASS"
+"clone model default: $defaultModel (combo) - PASS"
 'launcher-defaults: 3/3 PASS'

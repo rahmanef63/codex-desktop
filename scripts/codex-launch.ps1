@@ -405,16 +405,22 @@ if ($Mode -eq 'clone') {
         }
         Write-Host "using BYOK profile: $Profile$(if ($Model) { ' (model override: ' + $Model + ')' })"
     } else {
-        # Default clone model: deepseek-v4.1-flash-free on this gateway (PROGRESS §12). Measured
-        # 2026-11-05 against cx/gpt-6.1-sol on chat, exec, MCP, sub-agent, image and a
-        # three-function code edit: passes on both. The plain slug is the one that works through
-        # the Codex path; `oc/deepseek-v4.1-flash-free` answers bare /chat/completions but the
-        # Codex path never connects ("Reconnecting... 1/5"), so it looks healthy while doing
-        # nothing — that is why oc/* is hidden in the catalog now.
-        # cx is the fallback: it keeps input_image intact, where the ctx/* copies were
-        # unstable on images (1/3) and cost more tokens for the same answer.
-        # `-Model ...` still overrides this for one launch.
-        Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'deepseek-v4.1-flash-free' }) 'nine_router'
+        # Default clone model: the cache-first combo. Combo slugs are the only ones with a
+        # fallback chain, and this one is ordered so the cheap-to-reuse upstream comes first.
+        #
+        # Why cache decides the default (measured 2026-11-06, two runs each, same 11-step task):
+        #   cx/gpt-6.1-sol      84.4% and 91.9% of input billed as cache hits
+        #   deepseek-v4.1-flash-free   0.0% and 0.0%
+        # With cache priced at a tenth of fresh input, the cx run costs ~17% of what the
+        # deepseek run costs for the same work, even though its RAW token count is HIGHER
+        # (216k vs 155k). Raw tokens are the wrong target.
+        # The deepseek combo starts with ctx/ollama/..., and every ctx/* upstream reports
+        # zero cache, so the entire prefix is re-billed on every turn.
+        # Also measured: cx tokenises the same payload smaller (7490 vs 9824 tokens for an
+        # identical 25,000-char body).
+        # plain `oc/deepseek-v4.1-flash-free` never connects through the Codex path, which is
+        # why oc/* is hidden in the catalog. `-Model ...` still overrides this for one launch.
+        Set-CloneModel $targetConfig $(if ($Model) { $Model } else { 'cache-first' }) 'nine_router'
     }
 
     # Preflight: never open a window that cannot answer. The gateway is a separate process on

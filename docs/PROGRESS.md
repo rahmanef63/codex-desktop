@@ -1365,3 +1365,105 @@ menjalankan tool `echo E2E-AFTER-PATCH`.
 
 Rollback gateway: image lama `5fc7020f3cf1` masih ada; config container tercatat di
 `~/9router-patch/container-config.txt` (VPS), backup kedua berkas di direktori yang sama.
+
+## 20. Bukan context window-nya yang salah: prompt cache 0% itu akar biayanya (2026-11-06)
+
+Permintaan: "jangan cuma perbesar context, cari tahu kenapa seboros ini". Diukur, bukan
+diduga. Ternyata memperbesar/memperkecil context window nyaris tidak berpengaruh; yang
+menentukan adalah **cache hit**.
+
+### Angka dasar, satu sesi klon
+
+```
+turns                 248
+input tokens     52.287.140
+output tokens       172.503
+input : output        303 : 1
+cache hit                0%
+```
+
+Input 303x output. Itu bukan tanda model bodoh, itu tanda setiap turn membayar ulang
+seluruh prefix.
+
+### Ke mana token-nya pergi: biaya re-send, bukan ukuran
+
+Item yang bertahan di riwayat dikirim ulang di **setiap** turn berikutnya, jadi biaya
+sebenarnya sebuah item = ukuran x jumlah turn sesudahnya. Itu kuadratik, dan tidak
+kelihatan di total mentah.
+
+| kategori | bagian dari token re-sent |
+| --- | --- |
+| tool output (`custom_tool_call_output` + `function_call_output`) | **72,8%** |
+| reasoning | 11,2% |
+| message | 10,6% |
+| tool call args | 5,4% |
+
+Total re-send = **75%** dari seluruh input, 118 sesi: 209.969.683 dari 278.811.969 token.
+
+Alat: `bin/codex-cost` (`--home`, `--all`, `--top N`). Dikunci `app/tests/test-cost.py`
+(13 assert), termasuk bug yang alat itu sendiri pernah punya: whitelist ekstraksi teks
+cocok ke `content: null` sebelum `summary`, sehingga reasoning dilaporkan 0%. Angka
+pertama yang keluar dari alat ini **salah** dan sudah dikoreksi.
+
+### Tuas yang diuji dan hasilnya
+
+| hipotesis | hasil |
+| --- | --- |
+| context window kecil memotong biaya | 950k→200k hanya **98%→71%** dari total; di bawah 60k **mendatar di 52%**. Compaction terbukti menyala (8x dalam satu uji, reset ke ~13,4k), tapi ia mengubah bentuk biaya, bukan besarnya |
+| `tool_output_token_limit` memotong | cap 8.000 hanya menyelamatkan **1,3%**; cap 2.000 pun cuma 8,0%. 246 tool output, hanya 4 yang >8k |
+| effort `high` mahal | effort high 183.264 vs low 182.952 token, reasoning 1.516 vs 1.343 char. **Bukan tuas** |
+| `model_reasoning_summary = "none"` | tidak mengecilkan; justru 465 char vs 101. Efeknya acak, bukan knob biaya |
+| **prompt cache** | **ini tuasnya** |
+
+### Cache: 0% vs 90%, terukur dua kali
+
+Tugas 11 langkah identik, dua model, dua run masing-masing:
+
+| model | input | cached | hit |
+| --- | --- | --- | --- |
+| `deepseek-v4.1-flash-free` (combo, `ctx/*` dulu) | 155.309 | 0 | **0,0%** |
+| `cx/gpt-6.1-sol` | 214.460 | 196.992 | **91,9%** |
+| `deepseek-v4.1-flash-free` | 155.983 | 0 | **0,0%** |
+| `cx/gpt-6.1-sol` | 214.586 | 197.120 | **91,9%** |
+
+Perhatikan: `cx` punya token **mentah lebih banyak** (214k vs 155k) tapi dengan cache
+seharga sepersepuluh, biaya efektifnya ~**17%** dari `ctx`. Jadi mengejar jumlah token
+mentah justru menyesatkan.
+
+Sebabnya struktural: combo `deepseek-v4.1-flash-free` dimulai dengan
+`ctx/ollama/deepseek-v4.1-flash:cloud`, dan **setiap** upstream `ctx/*` melaporkan cache 0.
+Seluruh prefix dibayar ulang tiap turn selamanya.
+
+Tambahan: `cx` juga memakai tokenizer lebih hemat — payload 25.000 char identik jadi
+**7.490** token di `cx` vs **9.824** di `deepseek` (24% lebih sedikit).
+
+### Yang diterapkan
+
+1. **Combo `cache-first`** dibuat di gateway:
+   `["cx/gpt-6.1-sol", "cx/gpt-6-luna", "ag/gemini-3.8-flash"]` — OpenAI-native dulu (cache
+   kena), `ag/*` sebagai jalan terakhir kalau sisi OpenAI tumbang. Default klon pindah ke
+   slug ini.
+2. **Verifikasi di jalur Codex nyata**, bukan cuma curl: sesi 9 turn dengan combo baru →
+   **cache hit 89,6%** (295.296 dari 329.746 token).
+3. `bin/codex-cost` + tesnya.
+4. `app/tests/test-launcher-defaults.ps1` sekarang menuntut default berupa **combo**, bukan
+   slug upstream telanjang — slug telanjang tidak punya rantai fallback *dan* tidak punya cache.
+
+### Yang TIDAK bisa diklaim
+
+- **Kualitas di bawah compaction belum terbukti.** Uji codeword sempat memberi hasil
+  "compaction lebih baik" (1 compaction, recall benar, vs tanpa compaction yang lupa), lalu
+  A/B 4 run berikutnya memberi hasil campur: 3 run tanpa compaction pun recall benar, dan
+  model kadang berhenti sebelum langkah final karena alasan yang tidak ada hubungannya
+  dengan context. **Jangan mengutip hasil kualitas apa pun dari sesi ini.** Yang reproducible
+  hanya cache. Uji kualitas butuh tugas dengan jawaban yang bisa diverifikasi mesin dan
+  beberapa ulangan; itu belum dikerjakan.
+- Cache 90% hanya untuk `cx/*` dan `codex-all` (69,7%). `ctx/*` tetap 0% — itu sifat
+  upstream, tidak bisa dipaksa dari klien. `prompt_cache_key`/`store` sudah dicoba: tidak
+  mengubah apa pun.
+
+### Gate
+
+`app/tests/run-tests.mjs` **12/12**; `tests/shortcut-contract.sh` 6 PASS;
+`instruct-contract` 12 PASS; `secret-scan` bersih; `codex-doctor` (asli + klon) PASS dengan
+77 model; `codex exec` di klon jalan pada combo `cache-first`.
