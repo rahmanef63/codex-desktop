@@ -73,6 +73,16 @@ def check_home():
                "set CODEX_HOME, or run on a host that has a Windows profile")
 
 
+def profile_path(home, name):
+    """A profile is `<name>.config.toml`; the sentinel "config" is the base config.toml itself.
+
+    The clone home has no profiles at all: the launcher writes one `config.toml` that already
+    names its provider. Refusing that as "none" made `codex-doctor --home ~/.codex-clone`
+    report a healthy clone as broken.
+    """
+    return os.path.join(home, "config.toml" if name == "config" else "%s.config.toml" % name)
+
+
 def check_profiles(home):
     try:
         names = sorted(n[: -len(".config.toml")] for n in os.listdir(home)
@@ -81,6 +91,11 @@ def check_profiles(home):
         record("profiles", False, "cannot list %s: %s" % (home, e))
         return []
     if not names:
+        cfg = parse_profile(os.path.join(home, "config.toml"))
+        pid = cfg.get("model_provider")
+        if pid:
+            record("profiles", True, "inline (config.toml names %s)" % pid)
+            return ["config"]
         record("profiles", False, "none", "run bin/codex-onboard")
         return []
     record("profiles", True, "%d: %s" % (len(names), ", ".join(names)))
@@ -97,11 +112,14 @@ def fetch_models(base_url, token, timeout=15):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.load(resp)
-        return [m.get("id") for m in data.get("data", []) if m.get("id")], None
+        items = data.get("data", [])
+        ids = [m.get("id") for m in items if m.get("id")]
+        combos = {m.get("id") for m in items if m.get("owned_by") == "combo" and m.get("id")}
+        return ids, combos, None
     except urllib.error.HTTPError as e:
-        return [], "HTTP %d %s" % (e.code, e.reason)
+        return [], set(), "HTTP %d %s" % (e.code, e.reason)
     except Exception as e:  # noqa: BLE001 - any failure here is reported, never raised
-        return [], "%s: %s" % (type(e).__name__, e)
+        return [], set(), "%s: %s" % (type(e).__name__, e)
 
 
 def parse_profile(path):
@@ -116,7 +134,11 @@ def parse_profile(path):
     for line in lines:
         s = line.strip()
         if s.startswith("[") and s.endswith("]"):
-            section = s
+            # Brackets stripped: every reader here builds keys as
+            # "model_providers.<id>.base_url", so keeping "[model_providers.<id>]" as the
+            # prefix made all of them miss. A missed base_url is "no endpoint"; a missed
+            # token is a working gateway reported as HTTP 401.
+            section = s.strip("[]").strip()
             continue
         if "=" in s and not s.startswith("#"):
             k, _, v = s.partition("=")
@@ -136,12 +158,12 @@ def check_endpoint(home, names, fast):
     cfg_pid = cfg.get("model_provider")
     active = None
     for n in names:
-        p = parse_profile(os.path.join(home, "%s.config.toml" % n))
+        p = parse_profile(profile_path(home, n))
         if cfg_pid and p.get("model_provider") == cfg_pid:
             active = (n, p)
             break
     if active is None:
-        active = (names[0], parse_profile(os.path.join(home, "%s.config.toml" % names[0])))
+        active = (names[0], parse_profile(profile_path(home, names[0])))
     name, prof = active
 
     pid = prof.get("model_provider") or cfg_pid
@@ -152,7 +174,7 @@ def check_endpoint(home, names, fast):
         for k, v in prof.items():
             if k.endswith(".base_url"):
                 base = v
-                pid = k.split(".")[1]
+                pid = k[len("model_providers."):-len(".base_url")]
                 break
     if not base:
         record("endpoint", None, "no base_url in profile %s" % name)
@@ -163,10 +185,12 @@ def check_endpoint(home, names, fast):
     model = prof.get("model") or cfg.get("model")
     if fast:
         record("endpoint", None, "skipped (--fast): %s" % base)
+        if model:
+            record("model", None, "%s (endpoint probe skipped with --fast)" % model)
         return
     # The token is read to authenticate, never printed.
     token = prof.get("model_providers.%s.experimental_bearer_token" % pid) or ""
-    ids, err = fetch_models(base, token)
+    ids, combos, err = fetch_models(base, token)
     if err:
         record("endpoint", False, "%s -> %s" % (base, err),
                "start the gateway, or fix base_url in %s.config.toml" % name)
@@ -175,6 +199,11 @@ def check_endpoint(home, names, fast):
     if model and ids and model not in ids:
         record("model", False, "%s is not served" % model,
                "bin/codex-byok --home %s pick" % home)
+    elif model and ids and combos and model not in combos:
+        # Bare upstream slug has no fallback chain and fails on first error.
+        combo_hint = "deepseek-v4.1-flash-free" if "deepseek-v4.1-flash-free" in combos else next(iter(sorted(combos)), "a combo")
+        record("model", False, "%s (no fallback chain)" % model,
+               "switch to combo %s; bare upstream slug dies on first error" % combo_hint)
     elif model:
         record("model", True, model)
 

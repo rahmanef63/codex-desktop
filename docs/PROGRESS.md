@@ -1175,3 +1175,193 @@ kegagalan connect yang dihitung mati.
 - Preflight memeriksa "ada yang mendengarkan", bukan "model ini dilayani". Model yang tidak
   ada di `/v1/models` tetap lolos preflight dan tetap gagal di app. Itu tugas `codex-doctor`.
 - Gateway bisa hidup lalu mati di tengah sesi. Preflight tidak menolong kasus itu.
+
+## 17. Desktop tinggal satu ikon: aplikasi asli itu ChatGPT, bukan Codex (2026-11-05)
+
+Keputusan pemilik: **Codex = repo klon ini. Aplikasi asli namanya ChatGPT.** Jadi ikon
+`Codex` (mode real) di Desktop dihapus; `Codex Clone` tetap.
+
+Sebabnya bukan kosmetik. MSIX `OpenAI.Codex` sudah memasang Start Menu entry bernama
+`ChatGPT.lnk` (`app\ChatGPT.exe`, home default `~/.codex`). Shortcut `-Mode real` adalah
+nama kedua untuk launch yang sama — persis pola duplikasi yang dulu melahirkan empat ikon.
+Nama `Codex` di desktop lalu dibaca sebagai "codex kedua", padahal yang klon juga bernama Codex.
+
+Batas: `codex-launch.ps1 -Mode real` **tidak dihapus**. Ia satu-satunya jalan mendapat
+re-assert config (model, sandbox) untuk akun asli; yang dihapus hanya shortcut Desktop-nya.
+
+| berkas | perubahan |
+| --- | --- |
+| `scripts/install-shortcuts.ps1` | `$Shortcuts` = 1 entri (`Codex Clone`); prune menghapus `Codex.lnk` |
+| `bin/shortcut-check` | "expected 1" bukan "expected 2 (one per mode)" |
+| `README.md` | "Create the desktop shortcut (clone mode only)" + sebabnya |
+| `docs/DESKTOP.md` | tabel 18 shortcut, `Codex` baris hilang, `Codex Clone` menunjuk repo utama |
+
+Bukti: `bin/shortcut-check` → 8 PASS 0 FAIL; `tests/shortcut-contract.sh` → 6 PASS (INFO
+"no shortcut for mode 'real'" memang diharapkan); `--selftest` 7/7; `bin/desktop-audit` →
+18 shortcut, 0 rusak; `app/tests/run-tests.mjs` 9/9.
+
+## 18. Gateway pindah ke 9router VPS, bukan loopback (2026-11-05)
+
+Keputusan pemilik: pakai `https://router.antinrml.com/v1` (9router di `ssh antinrml`), bukan
+gateway lokal yang sudah dikarantina.
+
+### Kenapa lokal tidak dipakai lagi
+
+`~/.9router` dikarantina 16:33 (§13) dan unit systemd-nya ikut hilang, jadi
+`http://127.0.0.1:20128/v1` mati permanen sampai dipulihkan manual. VPS sudah hidup tanpa
+campur tangan: container `decolua/9router@sha256:5fc7020f…` (0.5.104), traefik mengekspos
+**hanya `/v1`**, dashboard tidak terbuka.
+
+### Yang diukur, bukan diasumsikan
+
+| probe | hasil |
+| --- | --- |
+| `GET /v1/models` dengan kunci VPS | **200**, 76 model |
+| `POST /v1/responses` `deepseek-v4.1-flash-free` | `PONG` |
+| `POST /v1/responses` + tool `exec` | `function_call {"cmd":"echo hi"}` |
+| kunci lokal `sk-cb52…` ke VPS | **401** — kunci VPS beda (`~/.config/opencode/9router-vps.key`) |
+| `codex exec` nyata di klon | jawaban `PONGPONG`; tool `exec` `echo VPS-TOOL-OK` jalan, 34k token |
+
+Katalog diregenerasi dari VPS: **76 entri** (bukan 99). 23 entri hilang karena model itu
+(`cx/gpt-5.6-*`, `ag/gemini-4-argon-low/medium`) hanya ada di gateway lokal.
+
+Batas: `cx/gpt-6.1-sol` sedang kena kuota upstream (`429`, reset 30 menit), jadi jatuh ke
+`deepseek-v4.1-flash-free` → `gemini-3.8-flash` lewat combo. Itu rantai fallback yang memang
+diharapkan, bukan kegagalan.
+
+### Dua bug yang muncul justru karena gateway sekarang menjawab
+
+1. **`parse_profile` menyimpan section dengan kurung siku.** Semua lookup
+   `model_providers.<id>.base_url` dan `…experimental_bearer_token` meleset. Saat gateway lokal
+   mati, gejalanya "connection refused" sehingga bug ini tidak kelihatan; begitu endpoint
+   ber-key, hasilnya **HTTP 401 pada gateway yang sehat**. Sekarang kurung dibuang saat parse.
+2. **Home klon tidak punya `<nama>.config.toml`.** Launcher menulis satu `config.toml` yang
+   sudah menyebut providernya sendiri, dan `codex-doctor` melaporkan itu sebagai
+   `profiles: none` + hint `bin/codex-onboard`. Sekarang dikenali sebagai
+   `inline (config.toml names nine_router)`.
+
+Regresi dikunci `app/tests/test-doctor-parse.py` (9 assert: bracket, token, inline home, empty
+home). `app/tests/test-gateway-preflight.ps1` juga berhenti memaku URL hidup — fixture sementara
+untuk nilai, dan assertion terpisah bahwa profil nyata punya `base_url` apa pun isinya.
+
+Gate: `app/tests/run-tests.mjs` **10/10**; `tests/instruct-contract.sh` 12/12;
+`bin/codex-doctor` (real + klon) 9 PASS 0 FAIL; `bin/shortcut-check` 8 PASS.
+
+## 19. Screenshot ditagih sebagai teks base64, dan context window 1 juta itu bohong (2026-11-06)
+
+Gejala yang dilaporkan: `[400]: The prompt is too long: 1177971, model maximum context
+length: 1048576`. Ternyata bukan satu bug, tapi tiga, dan dua di antaranya menjelaskan
+kenapa satu sesi bisa membakar 52 juta token input untuk 172 ribu token output.
+
+### 19a. Gambar di tool output = teks base64
+
+Translator Responses→Chat yang **benar-benar jalan** ada di bundle, bukan di `open-sse/`:
+
+```
+/app/.next/server/chunks/8499.js
+  e.messages.push({role:g.z7.TOOL,tool_call_id:a.call_id,
+                   content:"string"==typeof a.output?a.output:JSON.stringify(a.output)})
+```
+
+`JSON.stringify` membuat part `input_image` jadi teks. Base64 ikut terhitung sebagai token
+teks. Diukur ke gateway yang sama, PNG 1440×1000 yang sama:
+
+| posisi gambar | delta token SEBELUM | SESUDAH |
+| --- | --- | --- |
+| di user message (`image_url`, jalur benar) | +1.839 | +1.839 |
+| di `custom_tool_call_output` (bug) | +15.791 | **+1.835** |
+| di tool output, PNG high-entropy (5,76 jt char b64) | +323.809 | **+1.835** |
+
+Probe: `/tmp/opencode/probe_gw.py`. Angka "sesudah" diukur ulang dari container yang sudah
+di-recreate dari image commit, bukan dari container sementara.
+
+Konsekuensi di sesi nyata (`rollout-2026-11-05T04-43-34-…`): 13 screenshot = **19.096.537**
+dari 52.287.140 token input (**37%**), dan diulang tiap turn sesudahnya. Kalau ditagih wajar,
+13 gambar itu ~19.500 token.
+
+Jalur Anthropic di bundle yang sama **sudah benar** — bukti bahwa bentuk yang dipakai patch
+memang diterima provider:
+
+```js
+e.push({role:h.z7.TOOL,tool_call_id:c.tool_use_id,content:a}),
+d.length&&(b.push({type:h.x4.TEXT,text:`[Image from tool result ${c.tool_use_id}]`}),b.push(...d))
+```
+
+Patch meniru bentuk itu: teks tetap di pesan `tool`, gambar diangkat ke pesan `user`
+berikutnya. String output tidak berubah perilakunya.
+
+### 19b. `context_window` di katalog memaksa compact terlambat
+
+Katalog menulis `context_window = 1000000`, `effective_context_window_percent = 95`. Codex
+karena itu baru compact di ~950.000 — sementara upstream menolak di 1.048.576. Dalam sesi
+yang sama ada tiga lompatan yang tidak pernah di-compact:
+
+```
+286.524 -> 696.451   (+409.927)
+172.190 -> 841.074   (+668.884)
+190.575 -> 1.004.836 (+814.261)
+```
+
+Dari 78 sesi klon, **nol** event compaction. Sekarang launcher memaku dua key numerik
+top-level tiap run klon:
+
+```toml
+model_context_window = 200000
+model_auto_compact_token_limit = 150000
+```
+
+Terverifikasi di sesi nyata setelah perubahan: `token_count.info.model_context_window` =
+**190000** (Codex menerapkan faktor 95% yang sama) dan `model = deepseek-v4.1-flash-free`.
+
+⚠️ Dua jebakan saat menulis key ini, keduanya kena waktu dikerjakan:
+- `Set-CloneTopLevel` menulis `key = "nilai"` bertanda kutip → tidak bisa dipakai untuk angka.
+  Karena itu ada `Set-CloneNumber`.
+- Key yang di-append ke akhir file jatuh ke dalam tabel terakhir (`[memories]`), dan Codex
+  melaporkannya sebagai `memories.model_auto_compact_token_limit is ignored`. Key harus
+  disisipkan **sebelum** header `[tabel]` pertama.
+
+### 19c. Slug polos punya fallback, slug upstream tidak
+
+`deepseek-v4.1-flash-free` adalah combo:
+`ctx/ollama/deepseek-v4.1-flash:cloud` → `ag/gemini-3.8-flash` → `cx/gpt-6.1-sol`.
+`ctx/ollama/deepseek-v4.1-flash:1017-cloud` **bukan** combo, jadi error pertama langsung
+mematikan turn tanpa lompat ke upstream lain. Itu sebabnya 400 di laporan tidak pernah
+diselamatkan fallback.
+
+`bin/codex-doctor` sekarang menandai ini:
+
+```
+FAIL  model  ctx/ollama/deepseek-v4.1-flash:1017-cloud (no fallback chain)
+             switch to combo deepseek-v4.1-flash-free; bare upstream slug dies on first error
+```
+
+### 19d. Prompt cache: `ctx/*` tidak punya, `cx/*` punya
+
+| model | turns | input | cached |
+| --- | --- | --- | --- |
+| `ctx/conextlab/ollama/deepseek-v4.1-flash:cloud` | 1.267 | 247.171.913 | **0** |
+| `ctx/ollama/deepseek-v4.1-flash:1017-cloud` | 136 | 24.293.175 | **0** |
+| `cx/gpt-6.1-sol` | 48 | 2.091.228 | 1.594.880 (**76%**) |
+
+Semua sesi: 0,58% cache hit. Tidak diperbaiki di sini — itu sifat upstream, bukan sesuatu
+yang bisa dipaksa dari klien. Dicatat supaya biaya `ctx/*` tidak lagi dibandingkan apple-to-apple
+dengan `cx/*`.
+
+### Berkas
+
+| berkas | perubahan |
+| --- | --- |
+| `scripts/clone-AGENTS.md` | section `## Images`: larang tool screenshot, sebut harga terukurnya |
+| `scripts/codex-launch.ps1` | `Set-CloneNumber` + pin `model_context_window`/`model_auto_compact_token_limit` |
+| `bin/codex-doctor` | `fetch_models` mengembalikan combo; model non-combo → FAIL + hint |
+| `app/tests/test-context-keys.ps1` (baru) | 4 assert: sisip sebelum tabel, rewrite in-place, no-op byte-identik, CRLF, integer tanpa kutip |
+| **VPS** `9router:patched-20261106` | bundle `8499.js` + `open-sse/.../openai-responses.js`: gambar di tool output jadi `image_url`, bukan teks |
+
+### Gate
+
+`app/tests/run-tests.mjs` **11/11**; `tests/shortcut-contract.sh` 6 PASS; `instruct-contract`
+12 PASS; `bin/codex-doctor` (asli + klon) 9 PASS; `secret-scan` bersih; `codex exec` di klon
+menjalankan tool `echo E2E-AFTER-PATCH`.
+
+Rollback gateway: image lama `5fc7020f3cf1` masih ada; config container tercatat di
+`~/9router-patch/container-config.txt` (VPS), backup kedua berkas di direktori yang sama.

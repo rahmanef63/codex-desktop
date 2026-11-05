@@ -100,6 +100,11 @@ day rediscovering them.
 ## Setup
 
 The launcher expects the app installed and a profile at `~/.codex/9router.config.toml`.
+That profile's `base_url` is where the models come from — `https://router.antinrml.com/v1`
+(the 9router on the `antinrml` VPS) is the one this machine uses now; a local
+`http://127.0.0.1:20128/v1` also works if you run a gateway yourself.
+`bin/codex-doctor` prints which endpoint is actually answering, and the token is read from the
+profile, never from here.
 
 ```powershell
 # clone mode is the default: bare launch seeds ~/.codex-clone from the profile and copies
@@ -110,15 +115,18 @@ powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1
 powershell -ExecutionPolicy Bypass -File scripts/codex-launch.ps1 -Mode real
 ```
 
-Create desktop shortcuts that pass `-Mode clone` and `-Mode real`:
+Create the desktop shortcut (clone mode only):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install-shortcuts.ps1
-bin/shortcut-check            # prove they still point at this checkout
+bin/shortcut-check            # prove it still points at this checkout
 tests/shortcut-contract.sh    # six rules, seven negative fixtures, --selftest
 ```
 
-Two shortcuts, one per mode: they run *this* checkout's launcher over `\wsl.localhost`.
+One shortcut, `Codex Clone`: it runs *this* checkout's launcher over `\wsl.localhost`.
+The real account gets no desktop shortcut — that app is ChatGPT, and the Store already puts a
+`ChatGPT` entry in the Start Menu that opens it with the default `~/.codex` home. Use
+`scripts/codex-launch.ps1 -Mode real` by hand if you want the launcher's config re-assertions.
 The icon is resolved by `scripts/resolve-codex-icon.ps1`, which caches a stable copy under
 `%LOCALAPPDATA%\codex-desktop\icon.ico` — **never** pin an icon to
 `WindowsApps\OpenAI.Codex_<version>_...` by hand. The Store replaces that folder on every

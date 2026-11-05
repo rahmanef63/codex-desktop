@@ -211,14 +211,14 @@ done <<<"$RAW"
 # ------------------------------------------------------------------------------- whole-desktop
 printf '\nwhole desktop\n'
 
+# Exactly one: the clone. The real account is already named ChatGPT by the Store's Start Menu
+# entry, so a second desktop icon for it is the duplication this check now rejects.
 if [ "$CODEX_COUNT" -eq 0 ]; then
 	bad "no shortcut launches codex-launch.ps1 - run: powershell -File scripts/install-shortcuts.ps1"
 elif [ "$CODEX_COUNT" -eq 1 ]; then
 	ok "1 codex shortcut"
-elif [ "$CODEX_COUNT" -eq 2 ]; then
-	ok "2 codex shortcuts, one per mode"
 else
-	bad "$CODEX_COUNT codex shortcuts; expected 2 (one per mode: real, clone)"
+	bad "$CODEX_COUNT codex shortcuts; expected 1 (the clone)"
 fi
 
 if [ "$FOUND_REPO_TARGET" = "yes" ]; then

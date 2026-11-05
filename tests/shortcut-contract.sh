@@ -399,9 +399,10 @@ else
 	[ "$count" -gt 0 ] && ok "R6 no duplicate script+mode pairs ($count shortcut(s))"
 fi
 
-# Both modes present is what a working Desktop looks like; missing one is not a rule violation
-# by itself, so it is reported, not failed.
-for m in real clone; do
+# clone only is the intended shape (the real app is named ChatGPT in the Start Menu), so a
+# missing mode is reported, never failed. A shortcut for 'real' would be the duplication this
+# repo already cleaned up once.
+for m in clone real; do
 	grep -q "	$m	" "$WORK/pairs.tsv" || info "no shortcut for mode '$m'"
 done
 

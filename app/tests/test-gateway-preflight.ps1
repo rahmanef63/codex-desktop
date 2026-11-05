@@ -48,14 +48,34 @@ if (-not (Test-GatewayReachable 'https://api.example.com/v1' 1)) {
 if (-not (Test-GatewayReachable '' 1)) { throw 'an empty base URL was refused' }
 if (-not (Test-GatewayReachable $null 1)) { throw 'a null base URL was refused' }
 
-# 5. Get-ProfileBaseUrl must find the table the profile actually uses. The real 9router
-#    profile is the fixture: it is the file this guard is protecting.
+# 5. Get-ProfileBaseUrl must find the table the profile actually uses. A temp fixture, not the
+#    live profile: that one moved from http://127.0.0.1:20128/v1 to the VPS on 2026-11-05, and
+#    a test pinned to today's value fails on the next deliberate change instead of on a bug.
+$fixture = Join-Path $env:TEMP ('nine-router-profile-' + [guid]::NewGuid().ToString('N') + '.toml')
+@'
+approval_policy = "never"
+model_provider = "nine_router"
+model = "deepseek-v4.1-flash-free"
+
+[model_providers.nine_router]
+base_url = "https://router.example.test/v1"
+wire_api = "responses"
+'@ | Set-Content -LiteralPath $fixture -Encoding UTF8
+try {
+    $base = Get-ProfileBaseUrl $fixture
+    if ($base -ne 'https://router.example.test/v1') {
+        throw "expected the fixture's base_url, got '$base'"
+    }
+} finally {
+    Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue
+}
+
+# 6. The live profile, when present, must name SOME base_url: a profile with none is a launch
+#    that cannot answer, whatever that URL happens to be this week.
 $real = Join-Path $env:USERPROFILE '.codex\9router.config.toml'
 if (Test-Path -LiteralPath $real) {
     $base = Get-ProfileBaseUrl $real
-    if ($base -ne 'http://127.0.0.1:20128/v1') {
-        throw "expected the nine_router base_url, got '$base'"
-    }
+    if (-not $base) { throw 'the live nine_router profile has no base_url' }
 }
 
-Write-Host 'gateway preflight: 6 assertions passed'
+Write-Host 'gateway preflight: 7 assertions passed'

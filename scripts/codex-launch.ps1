@@ -148,6 +148,46 @@ function Set-CloneTopLevel($configPath, $key, $value) {
     Write-Host "$key added"
 }
 
+function Set-CloneNumber($configPath, $key, $value) {
+    # Rewrite ONE numeric top-level key, leaving every other byte alone (CONTRACT §5).
+    # Unquoted integer, strictly placed before the first [table] line.
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $raw = [System.IO.File]::ReadAllText($configPath, $utf8)
+    $newline = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $endsWithNewline = $raw.EndsWith("`n")
+    $suffix = if ($endsWithNewline) { $newline } else { '' }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.AddRange([string[]]($raw -split "`r?`n"))
+    if ($endsWithNewline) { $lines.RemoveAt($lines.Count - 1) }
+
+    $line = "$key = $value"
+    $pattern = '^' + [regex]::Escape($key) + '\s*='
+    $inSection = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $trimmed = $lines[$i].Trim()
+        if ($trimmed -match '^\[[^\[\]]+\]$') { $inSection = $true; continue }
+        if ($inSection) { continue }
+        if ($trimmed -match $pattern) {
+            if ($lines[$i] -ceq $line) { return }
+            $lines[$i] = $line
+            [System.IO.File]::WriteAllText($configPath, (($lines -join $newline) + $suffix), $utf8)
+            Write-Host "$key set"
+            return
+        }
+    }
+
+    # Absent: insert before the first table so it lands top-level.
+    $first = $lines.Count
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -match '^\[') { $first = $i; break }
+    }
+    if ($first -gt 0 -and $lines[$first - 1].Trim() -eq '') { $lines.Insert($first - 1, $line) }
+    else { $lines.Insert($first, $line) }
+    [System.IO.File]::WriteAllText($configPath, (($lines -join $newline) + $suffix), $utf8)
+    Write-Host "$key added"
+}
+
 # The app rewrites the top-level `model` (and sometimes `model_provider`) from the last UI
 # pick. In the clone that lands on a ChatGPT-only slug the nine_router provider cannot serve,
 # which surfaces as "Invalid model metadata". Re-assert both on every clone run. Only the
@@ -237,7 +277,9 @@ function Test-GatewayReachable($baseUrl, $timeoutSec = 5) {
     # blamed (`ctx/...:1017-cloud` looked dead; it had never been tested).
     #
     # Only loopback is probed. A remote provider is reachable or not for reasons this script
-    # cannot fix, and a wrong guess there would block a launch that actually works.
+    # cannot fix, and a wrong guess there would block a launch that actually works. That means
+    # the VPS endpoint (https://router.antinrml.com/v1, the default since 2026-11-05) is never
+    # preflighted here: `bin/codex-doctor` is the tool that answers "is it answering".
     if (-not $baseUrl) { return $true }
     $u = $null
     if (-not [System.Uri]::TryCreate($baseUrl, [System.UriKind]::Absolute, [ref]$u)) { return $true }
@@ -422,6 +464,15 @@ if ($Mode -eq 'clone') {
     # made the agent stop after a short answer. Never set it here; put additions in AGENTS.md,
     # which is appended instead of substituted. Remove it if an older config still has it.
     Set-CloneTopLevelRemove $targetConfig 'model_instructions_file'
+
+    # Pin the context budget so Codex does not compact too late (PROGRESS §16).
+    # The catalog advertises 1M context with 95% effective_context_window_percent, so Codex only
+    # compacts near 950,000 tokens. Upstream rejected at 1,177,971 tokens ("prompt is too long...
+    # model maximum context length: 1048576"). 200k is safely inside every upstream's real limit
+    # and 150k leaves room for one large tool result. Verified: `-c model_context_window=200000`
+    # makes Codex log `ctx window: 190000` (it applies the same 95% factor).
+    Set-CloneNumber $targetConfig 'model_context_window' 200000
+    Set-CloneNumber $targetConfig 'model_auto_compact_token_limit' 150000
 
     # The clone's global AGENTS.md was 0 bytes, so the model ran with no project rules at all:
     # no UNC workaround, no batching rule, nothing about the 3-agent limit or the 60 s wait

@@ -22,6 +22,17 @@ answer with a plan when the user asked for the work.
   in full; it gets truncated and you read 6% of it.
 - Host platform is win32: shell commands for Windows unless they need the workspace.
 
+## Images
+
+- Never call `view_image`, `emitImage`, `getAXStateAndScreenshot`, `getScreenshot`, or any
+  screenshot/image tool in this home.
+- Through the 9router Responses->Chat path, an image inside a tool result is serialised as
+  base64 TEXT and re-sent on every later turn. Measured: one 1440x1000 PNG cost ~250k tokens
+  per turn, 13 of them were 37% of a session's input.
+- Instead: read the file as text, ask for the path, or ask the user to describe it.
+- If a picture is genuinely unavoidable, say what it costs before taking it (~250k tokens
+  per screenshot, re-sent every turn).
+
 ## Sub-agents
 
 The thread budget is root + 3, and a fourth `spawn_agent` fails with

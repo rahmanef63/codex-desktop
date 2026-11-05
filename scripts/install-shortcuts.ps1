@@ -28,13 +28,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# One shortcut per mode. Four was two modes times two copies (Desktop launcher vs repo
-# launcher), and the duplication is what made "many Codex" on the desktop. Mode is the only
-# real axis, so one shortcut per mode — and clone (BYOK) comes first because it is this
-# machine's default. `codex-launch.ps1` defaults to -Mode clone too; both agree on purpose.
+# ONE shortcut. Four was two modes times two copies (Desktop launcher vs repo launcher), and
+# the duplication is what made "many Codex" on the desktop.
+#
+# The real account does not get a desktop shortcut: that app is ChatGPT, and the Store already
+# installed a Start Menu entry named ChatGPT.lnk that launches it with the default home
+# (~/.codex). A `-Mode real` shortcut would be a second name for the same launch, which is the
+# confusion this file exists to remove. `codex-launch.ps1 -Mode real` still works by hand.
 $Shortcuts = @(
-    @{ Name = 'Codex Clone'; Mode = 'clone'; Icon = 'ico'; Description = 'Codex Desktop - clone mode, 9router gateway, isolated home' }
-    @{ Name = 'Codex';       Mode = 'real';  Icon = 'exe'; Description = 'Codex Desktop - real mode, own ChatGPT account' }
+    @{ Name = 'Codex Clone'; Mode = 'clone'; Icon = 'ico'; Description = 'Codex Desktop clone - 9router gateway, isolated home' }
 )
 
 if (-not $RepoRoot) {

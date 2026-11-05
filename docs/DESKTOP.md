@@ -4,7 +4,7 @@ Catatan: **desktop ini berubah saat dokumen ini ditulis.** Sesi lain merapikan s
 secara paralel. Angka di bawah adalah keadaan **akhir**, dan bagian "Apa yang bergeser" mencatat
 urutannya. Kalau ragu, jalankan `bin/desktop-audit` — itu yang otoritatif, bukan berkas ini.
 
-**Sekarang: 19 shortcut, semuanya sehat.** 0 ikon rusak, 0 target hilang. Di tengah penulisan
+**Sekarang: 18 shortcut, semuanya sehat.** 0 ikon rusak, 0 target hilang. Di tengah penulisan
 sempat ada 21 shortcut dengan 4 ikon mati; dua dihapus, dua diperbaiki.
 
 `C:\Users\rahma\Desktop` bukan folder biasa, tapi **junction ke
@@ -30,14 +30,13 @@ dua kali. Shell Windows sendiri menunjuk ke `OneDrive\Desktop`.
 | 9 | Orca | User | 2026-10-17 | `%LOCALAPPDATA%\Programs\orca\Orca.exe` | ok |
 | 10 | T3 Code (Nightly) | User | 2026-10-22 | `%LOCALAPPDATA%\Programs\t3code\T3 Code (Nightly).exe` | ok |
 | 11 | Wonder | User | 2026-10-31 | `%LOCALAPPDATA%\Programs\wonder-client\Wonder.exe` | ok |
-| 12 | **Codex** | User | 2026-11-04 20:21 | `powershell.exe` → `\\wsl.localhost\...\cd-d1\scripts\codex-launch.ps1 -Mode real` | ok |
-| 13 | **Codex Clone** | User | 2026-11-04 20:22 | `powershell.exe` → `\\wsl.localhost\...\cd-d1\scripts\codex-launch.ps1 -Mode clone` | ok |
-| 14 | Comet | Public | 2026-10-30 | `C:\Program Files\Perplexity\Comet\Application\comet.exe` | ok |
-| 15 | Google Chrome | Public | 2026-11-04 | `chrome.exe` | ok |
-| 16 | Grok Bot | Public | 2026-10-19 | `C:\Program Files\Grok Bot\Grok Bot.exe` | ok |
-| 17 | Linear | Public | 2026-10-17 | `C:\Program Files\Linear\Linear.exe` | ok |
-| 18 | Microsoft Edge | Public | 2026-11-01 | `msedge.exe` | ok |
-| 19 | Pen | Public | 2026-11-01 | `C:\Program Files\Pen\Pen.exe` | ok |
+| 12 | **Codex Clone** | User | 2026-11-05 | `powershell.exe` → `\\wsl.localhost\...\codex-desktop\scripts\codex-launch.ps1 -Mode clone` | ok |
+| 13 | Comet | Public | 2026-10-30 | `C:\Program Files\Perplexity\Comet\Application\comet.exe` | ok |
+| 14 | Google Chrome | Public | 2026-11-04 | `chrome.exe` | ok |
+| 15 | Grok Bot | Public | 2026-10-19 | `C:\Program Files\Grok Bot\Grok Bot.exe` | ok |
+| 16 | Linear | Public | 2026-10-17 | `C:\Program Files\Linear\Linear.exe` | ok |
+| 17 | Microsoft Edge | Public | 2026-11-01 | `msedge.exe` | ok |
+| 18 | Pen | Public | 2026-11-01 | `C:\Program Files\Pen\Pen.exe` | ok |
 
 ### Temuan lain, di luar Codex
 
@@ -84,14 +83,16 @@ Yang benar-benar berbeda antar pintu:
 
 | Kebutuhan | Shortcut |
 |---|---|
-| Dua-duanya dipakai (akun asli **dan** BYOK/9router) | **2**: `Codex` + `Codex Clone` |
-| Hanya clone/BYOK | **1**: `Codex Clone` |
+| Akun asli | **0** di Desktop — MSIX sudah memasang `ChatGPT.lnk` di Start Menu (`app\ChatGPT.exe`, home default `~/.codex`) |
+| Clone/BYOK/9router | **1**: `Codex Clone` |
 
-Sekarang desktop sudah menyusut ke set ini: `Codex Real (repo)` dan `Codex Clone (repo)` sudah
-tidak ada. **Tapi `Codex Clone.lnk` sekarang menunjuk launcher di `cd-d1`, bukan `codex-desktop`.**
-`cd-d1` adalah worktree lain dari repo yang sama (`scripts/codex-launch.ps1` isinya identik, md5
-`a2597153…` sama dengan `cd-d11`). Itu bukan kesalahan — tapi artinya **shortcut ini menunjuk ke
-salinan repo, bukan ke repo utama**, dan ikut mati kalau `cd-d1` dihapus.
+**Keputusan 2026-11-05: aplikasi asli bernama ChatGPT, bukan Codex.** `Codex` adalah nama
+repo ini (klon). Karena itu shortcut `-Mode real` dihapus — ia cuma nama kedua untuk launch
+yang sama yang sudah disediakan Store, dan itulah yang membuat "ada 2 codex di desktop".
+`codex-launch.ps1 -Mode real` tetap ada untuk dipakai manual kalau perlu re-assert config.
+
+Sekarang desktop hanya punya `Codex Clone.lnk`, menunjuk repo utama `codex-desktop` (bukan
+worktree `cd-dN`).
 
 Launcher di `C:\Users\rahma\Desktop\codex-launch.ps1` (13.808 byte) kini **tidak dipakai siapa
 pun**: dua shortcut lama yang memakainya sudah hilang. Boleh dihapus, atau disimpan sebagai
