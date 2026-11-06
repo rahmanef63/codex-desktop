@@ -1751,3 +1751,38 @@ compaction terpaksa.
 sekarang (65%), tapi tidak ada lagi risiko 400 karena jendela sempit, dan tidak ada angka
 aneh yang perlu dijelaskan. Kalau suatu saat butuh satu turn besar (baca file raksasa), 1M
 tersedia tanpa mengubah biaya turn normal.
+
+## 26. Jendela 1M, compact 800k (2026-11-06)
+
+Keputusan pemilik: `model_context_window = 1000000`, `model_auto_compact_token_limit = 800000`
+(80% dari 1M).
+
+Terverifikasi di sesi nyata: Codex melaporkan `model_context_window = 1000000` — persis angka
+yang ditulis, tanpa faktor 0,95 lagi (§25).
+
+### Kenapa 1M jujur
+
+Bukan sekadar menyalin klaim gateway. Diukur: 904.825 token **diterima**; 1.177.971 ditolak
+dengan "model maximum context length: 1048576". Jadi 1M memang di dalam batas keras upstream,
+dan 800k menyisakan 248.576 token margin.
+
+Angka 200.000 sebelumnya **bukan hasil ukur** — itu tambalan panik setelah kena 400, dan
+sudah diakui begitu di §25.
+
+### Ongkos yang diterima (disimulasikan pada sesi nyata 248 turn)
+
+| setelan | compaction | total input | vs tanpa compaction |
+| --- | --- | --- | --- |
+| 200k / 150k (lama) | 46 | 33.995.027 | 65% |
+| **1M / 800k (sekarang)** | **7** | **46.399.378** | **89%** |
+| 1M / 900k | 1 | 51.295.704 | 98% |
+
+Jadi setelan ini ~36% lebih mahal daripada yang ketat, ditukar dengan: 7 kali compaction
+alih-alih 46, dan tugas panjang tidak terpotong.
+
+### Yang perlu diingat
+
+Biaya ditentukan **titik compaction**, bukan besar jendela. Menaikkan jendela dari 200k ke 1M
+tidak menambah biaya sama sekali; yang menambah adalah menaikkan ambang compact dari 150k ke
+800k. Kalau nanti biaya terasa berat, turunkan dulu `model_auto_compact_token_limit` —
+jendelanya boleh tetap 1M.

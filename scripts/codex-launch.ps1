@@ -429,14 +429,23 @@ if ($Mode -eq 'clone') {
     # which is appended instead of substituted. Remove it if an older config still has it.
     Set-CloneTopLevelRemove $targetConfig 'model_instructions_file'
 
-    # Pin the context budget so Codex does not compact too late (PROGRESS §16).
-    # The catalog advertises 1M context with 95% effective_context_window_percent, so Codex only
-    # compacts near 950,000 tokens. Upstream rejected at 1,177,971 tokens ("prompt is too long...
-    # model maximum context length: 1048576"). 200k is safely inside every upstream's real limit
-    # and 150k leaves room for one large tool result. Verified: `-c model_context_window=200000`
-    # makes Codex log `ctx window: 190000` (it applies the same 95% factor).
-    Set-CloneNumber $targetConfig 'model_context_window' 200000
-    Set-CloneNumber $targetConfig 'model_auto_compact_token_limit' 150000
+    # Context budget. Two independent dials, do not confuse them:
+    #   model_context_window         how many tokens one request may carry (the ceiling)
+    #   model_auto_compact_token_limit  when Codex summarises history to stay under it
+    #
+    # Owner decision 2026-11-06: 1M ceiling, compact at 800k (80%).
+    # 1M because that is what the gateway claims AND what was measured to work: 904,825 tokens
+    # were accepted, while 1,177,971 was rejected ("model maximum context length: 1048576").
+    # The old 200,000 was a panic patch after that rejection, never a measured value.
+    #
+    # Cost, simulated over a real 248-turn session (PROGRESS 25):
+    #   compact 150k -> 46 compactions -> 65% of the no-compaction cost
+    #   compact 800k ->  7 compactions -> 89%
+    # So this window is ~36% dearer than the tight one. That is the trade the owner chose:
+    # far fewer compactions, no truncation in long tasks, at a known price.
+    # Raising the ceiling costs nothing by itself -- the compaction point is what costs.
+    Set-CloneNumber $targetConfig 'model_context_window' 1000000
+    Set-CloneNumber $targetConfig 'model_auto_compact_token_limit' 800000
 
     # The clone's global AGENTS.md was 0 bytes, so the model ran with no project rules at all:
     # no UNC workaround, no batching rule, nothing about the 3-agent limit or the 60 s wait
