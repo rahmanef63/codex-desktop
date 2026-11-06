@@ -233,42 +233,6 @@ function Set-CloneModel($configPath, $model, $provider) {
     foreach ($c in $changes) { Write-Host $c }
 }
 
-function Set-ClonePluginDisabled($configPath, $pluginId) {
-    $utf8 = [System.Text.UTF8Encoding]::new($false)
-    $raw = [System.IO.File]::ReadAllText($configPath, $utf8)
-    $newline = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $endsWithNewline = $raw.EndsWith("`n")
-
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.AddRange([string[]]($raw -split "`r?`n"))
-    if ($endsWithNewline) { $lines.RemoveAt($lines.Count - 1) }
-
-    $header = '[plugins."' + $pluginId + '"]'
-    $headerIndex = -1
-    $current = ''
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $trimmed = $lines[$i].Trim()
-        if ($trimmed -match '^\[([^\[\]]+)\]$') { $current = $trimmed; continue }
-        if ($current -eq $header -and $trimmed -match '^enabled\s*=') {
-            if ($trimmed -ceq 'enabled = true') {
-                $lines[$i] = 'enabled = false'
-                $out = ($lines -join $newline) + $(if ($endsWithNewline) { $newline } else { '' })
-                [System.IO.File]::WriteAllText($configPath, $out, $utf8)
-                Write-Host "plugins.$pluginId disabled"
-            }
-            return
-        }
-    }
-
-    # No enabled line found: add the block so the plugin stays off even if the app
-    # later re-adds it with a different shape.
-    $lines.Add('')
-    $lines.Add($header)
-    $lines.Add('enabled = false')
-    $out = ($lines -join $newline) + $(if ($endsWithNewline) { $newline } else { '' })
-    [System.IO.File]::WriteAllText($configPath, $out, $utf8)
-    Write-Host "plugins.$pluginId disabled (added)"
-}
 
 function Test-GatewayReachable($baseUrl, $timeoutSec = 5) {
     # A profile whose provider lives on a local gateway opens a window that says
@@ -500,39 +464,14 @@ if ($Mode -eq 'clone') {
         }
     }
 
-    # chrome@openai-bundled must stay OFF in the clone. When it is on, Chrome launches
-    # extension-host.exe from inside plugins\cache\openai-bundled\chrome\latest, Windows
-    # then locks that file, and the app's own cache refresh fails on every start with
-    # "failed to back up plugin cache entry: Access is denied. (os error 5)".
-    # Measured: real home 0 occurrences, clone 15. With the plugin off, 0 in 638 log lines.
-    # The real account keeps it enabled; this only ever rewrites the clone config.
-    Set-ClonePluginDisabled $targetConfig 'chrome@openai-bundled'
-
-    # linear@openai-api-curated leaks its whole MCP tool surface into the `exec` tool
-    # description: 60+ tools, 74,150 characters, ~18,537 tokens — re-sent on EVERY turn.
-    # Measured 2026-11-06 by capturing the exact request body: with linear enabled the
-    # `exec` tool was 93,960 bytes and a trivial `say OK` turn cost 38,779 input tokens;
-    # with it disabled `exec` was 17,646 bytes and the same turn cost 18,150. That is a
-    # 53% cut on every single turn of every session, for a plugin this clone never uses.
-    # The real ChatGPT home keeps it on; only the clone is touched.
-    Set-ClonePluginDisabled $targetConfig 'linear@openai-api-curated'
-
-    # The GUI/desktop plugins advertise their tool surface the same way. Measured on top of
-    # the Linear cut: `mcp__cua_repl` alone was 6,601 bytes / ~1,650 tokens per turn, and
-    # `exec` inlined an `mcp__node_repl` section besides. Disabling all four took a `say`
-    # turn from 18,125 to 15,218 tokens.
-    # What is lost: in-app browser, Chrome control, computer use (screenshot clicks), and
-    # the codex-app-tools thread API. None of them worked here anyway — browser needs an app
-    # host (PROGRESS 13) and computer use needs a per-app allowlist decided in the ChatGPT
-    # UI. The shell is the supported path in this home, and clone-AGENTS.md says so.
-    # NOT disabled: browser@openai-bundled. It powers the in-app browser panel on the right,
-    # and turning it off visibly broke that panel -- a real loss, reported by the owner.
-    # Its tool surface costs less than the GUI plugins and it is a feature people use.
-    foreach ($plugin in @('unified-computer-use@openai-bundled',
-                          'computer-use@openai-bundled',
-                          'codex-app-tools@openai-bundled')) {
-        Set-ClonePluginDisabled $targetConfig $plugin
-    }
+    # Every plugin stays ENABLED, by owner decision 2026-11-06: the in-app browser panel and
+    # the rest are wanted, and a disabled plugin is a feature the owner loses to save tokens.
+    # The measured cost of that choice is recorded, not hidden: with linear@openai-api-curated
+    # enabled a trivial turn is ~39.8k input tokens instead of ~18k, because its 60+ MCP tools
+    # are inlined into the `exec` tool description and re-sent every turn (PROGRESS 21).
+    # Codex does have a deferral mechanism (tool_search / deferred_tool_world_state in the
+    # binary) but this build reports those keys as unrecognized, so it cannot be switched on
+    # from config here. Behaviour rule instead: clone-AGENTS.md forbids speculative mcp__* calls.
 
     # The clone's Chrome extension host keeps plugins\cache\openai-bundled\chrome\latest
     # open, so the app's own cache refresh hits
