@@ -79,6 +79,14 @@ def build_entry(template, slug, cap, priority):
         # --- limits ---
         context_window=ctx,
         max_context_window=ctx,
+        # The template comes from OpenAI's own models_cache.json, whose entries carry
+        # effective_context_window_percent = 95. Copying that onto a third-party slug is
+        # wrong twice over: the 5% margin is OpenAI's own safety habit, not something the
+        # upstream promised, and it silently multiplies whatever the user sets. Setting
+        # model_context_window = 200000 produced a reported window of 190000, which reads
+        # like a second limit nobody asked for. 100 means the number in the config is the
+        # number Codex uses -- one place to look, no hidden factor.
+        effective_context_window_percent=100,
         # 10000 was too small: on 2026-11-05 eight tool outputs in one clone session were cut,
         # the largest at 166854 tokens, so the model read 6% of a file and re-read it. 40000
         # keeps a full source file in one result without inviting the truncation loop back.

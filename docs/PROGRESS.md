@@ -1675,3 +1675,79 @@ Catatan yang mungkin muncul lagi: `chrome@openai-bundled` aktif membuat extensio
 `plugins\cache\openai-bundled\chrome\latest`, dan app bisa melaporkan
 `failed to back up plugin cache entry: Access is denied. (os error 5)` saat start. Itu
 peringatan kosmetik, bukan kegagalan launch.
+
+## 25. "Jendela" vs "context": satu hal, tiga angka (2026-11-06)
+
+Kebingungan yang perlu dibereskan, karena aku sendiri sempat menuliskannya ambigu.
+
+### Istilahnya
+
+Tidak ada dua hal berbeda. **Context window = jendela = context** — satu konsep, yaitu
+banyaknya token yang boleh dikirim dalam SATU request. Angka 190k yang dulu terlihat dan
+200k yang kutulis di config itu **angka yang sama**, hanya sebelum/sesudah dikali 0,95.
+
+Yang berbeda adalah **tiga angka** yang sering dicampur:
+
+| angka | arti | di sini |
+| --- | --- | --- |
+| batas upstream | maksimum keras dari provider; lewat ini → HTTP 400 | 1.048.576 (diukur: 904.825 diterima, 1.177.971 ditolak) |
+| klaim gateway `/v1/models` | yang dilaporkan 9router | 1.000.000 |
+| yang dipakai klien | angka yang benar-benar ditegakkan | Codex: config × pct; OpenCode: `limit.context` |
+
+### Kenapa OpenCode 1 juta dan Codex 200 ribu
+
+Bukan karena Codex lebih bodoh, tapi karena **aku** yang menyetelnya begitu:
+
+- OpenCode: `"limit": {"context": 1000000}` — ditulis tangan, apa adanya.
+- Codex: `model_context_window = 200000` — aku yang menulis 200k (PROGRESS §19b), sebagai
+  tindakan panik setelah kena 400 di 1.177.971. Itu tambalan, bukan keputusan yang diukur.
+
+Jujur: 200k itu **bukan hasil pengukuran**, itu angka aman yang kuambil supaya kejadian 400
+tidak terulang. Sekarang setelah tahu batas aslinya 1.048.576, 200k terlalu konservatif.
+
+### Plus-minus menaikkan jendela (disimulasikan pada sesi nyata 248 turn)
+
+| setelan | compaction | total input | vs asli |
+| --- | --- | --- | --- |
+| 200k / compact 150k (sekarang) | 46 | 33.995.027 | 65% |
+| 500k / compact 400k | 22 | 38.318.376 | 73% |
+| 1M / compact 900k | 1 | 51.295.704 | 98% |
+| 1M / compact 150k | 46 | 33.995.027 | 65% |
+
+**Plus** menaikkan:
+- Tugas panjang tak terpotong di tengah — satu sesi bisa menyelesaikan refactor besar tanpa
+  kehilangan konteks awal.
+- Compaction lebih jarang, dan tiap compaction berisiko: ringkasannya bisa membuang detail
+  yang masih dibutuhkan.
+
+**Minus** menaikkan:
+- Biaya per turn naik linear terhadap panjang riwayat yang dikirim ulang. 1M/900k = **98%**
+  dari biaya sesi tanpa compaction sama sekali.
+- Tanpa prompt cache (model ini 0%), tiap turn membayar penuh seluruh prefix. Riwayat 900k
+  berarti ~900k token ditagih **per turn**.
+- Latensi naik; model juga cenderung melupakan instruksi di tengah konteks panjang.
+
+**Yang penting:** `model_context_window` dan `model_auto_compact_token_limit` itu **dua dial
+terpisah**. Menaikkan jendela TIDAK harus menaikkan biaya — baris terakhir tabel membuktikan
+1M dengan compact 150k hasilnya identik dengan 200k/150k (65%). Yang menentukan biaya adalah
+**kapan memampat**, bukan seberapa besar jendela yang diizinkan.
+
+### Ongkos satu compaction (diukur, bukan dikira)
+
+Dari sesi yang benar-benar memampat 8 kali:
+
+```
+ringkasan yang ditulis : 1.117 char (~280 token)  -- murah
+turn yang menulisnya   : input 8.373 -> sesudahnya 13.364
+```
+
+Jadi compaction bukan operasi mahal; yang mahal adalah **membiarkan riwayat tumbuh** sampai
+compaction terpaksa.
+
+### Rekomendasi
+
+`model_context_window = 1000000` (jujur, sama dengan klaim gateway dan sama dengan OpenCode)
+**tetapi** `model_auto_compact_token_limit` tetap 150000. Hasil ukur: biaya sama dengan
+sekarang (65%), tapi tidak ada lagi risiko 400 karena jendela sempit, dan tidak ada angka
+aneh yang perlu dijelaskan. Kalau suatu saat butuh satu turn besar (baca file raksasa), 1M
+tersedia tanpa mengubah biaya turn normal.
