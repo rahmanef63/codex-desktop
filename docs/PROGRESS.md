@@ -1584,3 +1584,42 @@ Sesi nyata setelah perubahan: hanya **satu** tool call, `exec`. Nol `mcp__*`. Fl
 
 Memory masih aktif. Mematikannya hemat ~2.216 token/turn lagi, tapi belum diterapkan —
 menunggu keputusan.
+
+## 23. Koreksi: `browser@openai-bundled` bukan beban, dan mematikannya merusak panel (2026-11-06)
+
+Aku mematikan `browser@openai-bundled` bersama tiga plugin GUI lain tanpa mengukur dia
+sendiri. Pemilik melaporkan **panel browser di kanan jadi tidak maksimal**. Itu regresi yang
+aku sebabkan, dan kesalahannya bukan cuma "terlalu agresif" — aku mengasumsikan satu kelompok
+plugin punya biaya yang sama tanpa memisahkannya.
+
+### Diukur, bukan diasumsikan lagi
+
+A/B dengan **hanya** plugin itu yang berbeda, tugas sama (`say COSTPROBE`), urutan on/off/on/off:
+
+| run | browser | token |
+| --- | --- | --- |
+| 1 | on | 18.941 |
+| 2 | off | 18.941 |
+| 3 | on | 18.941 |
+| 4 | off | 18.941 |
+
+Request body juga identik: input 9.089 tok, tools 6.389 tok, 5 tool. **Nol biaya.** Panel
+browser memakai aset plugin yang sudah ada di disk; permukaan tool-nya tidak ikut disuntik ke
+`exec` seperti Linear dan `mcp__cua_repl`.
+
+### Yang diperbaiki
+
+- `browser@openai-bundled` **dinyalakan lagi** dan dikeluarkan dari daftar mati di
+  `codex-launch.ps1`, dengan komentar kenapa ia dikecualikan.
+- `app/tests/test-plugin-off.ps1` tidak lagi menuntut plugin itu dimatikan, dan mencatat hasil
+  A/B-nya sebagai alasan.
+
+Masih dimatikan (dan terukur): `linear@openai-api-curated` (−18.537 tok/turn),
+`unified-computer-use`, `computer-use`, `codex-app-tools` (−1.650 tok/turn gabungan),
+`chrome@openai-bundled` (kunci cache "Access is denied", alasan lain).
+
+### Pelajaran
+
+Empat plugin dalam satu `foreach` bukan berarti empat plugin yang sama. Yang menyuntik tool
+surface adalah plugin yang mengiklankan **tool**, bukan yang menyediakan aset. Kalau tidak
+diukur satu-satu, yang dikorbankan bisa fitur yang gratis.

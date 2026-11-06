@@ -26,8 +26,11 @@ if ($text -notmatch "Set-ClonePluginDisabled\s+\`$targetConfig\s+'chrome@openai-
     throw 'the launcher no longer disables chrome@openai-bundled (the Access is denied cache lock)'
 }
 # The GUI plugins advertise their tool surface too: mcp__cua_repl cost ~1,650 tokens/turn.
+# browser@openai-bundled is deliberately NOT in this list: it powers the in-app browser panel,
+# and an A/B with only that plugin toggled showed an identical 18,941-token turn (4 runs,
+# alternating). Disabling it bought nothing and broke a feature.
 foreach ($plugin in @('unified-computer-use@openai-bundled', 'computer-use@openai-bundled',
-                      'codex-app-tools@openai-bundled', 'browser@openai-bundled')) {
+                      'codex-app-tools@openai-bundled')) {
     if ($text -notmatch [regex]::Escape("'$plugin'")) {
         throw "the launcher no longer disables $plugin; its tool surface would be re-sent every turn"
     }

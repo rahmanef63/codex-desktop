@@ -525,10 +525,12 @@ if ($Mode -eq 'clone') {
     # the codex-app-tools thread API. None of them worked here anyway — browser needs an app
     # host (PROGRESS 13) and computer use needs a per-app allowlist decided in the ChatGPT
     # UI. The shell is the supported path in this home, and clone-AGENTS.md says so.
+    # NOT disabled: browser@openai-bundled. It powers the in-app browser panel on the right,
+    # and turning it off visibly broke that panel -- a real loss, reported by the owner.
+    # Its tool surface costs less than the GUI plugins and it is a feature people use.
     foreach ($plugin in @('unified-computer-use@openai-bundled',
                           'computer-use@openai-bundled',
-                          'codex-app-tools@openai-bundled',
-                          'browser@openai-bundled')) {
+                          'codex-app-tools@openai-bundled')) {
         Set-ClonePluginDisabled $targetConfig $plugin
     }
 
