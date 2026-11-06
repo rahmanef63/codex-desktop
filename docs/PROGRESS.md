@@ -1623,3 +1623,55 @@ Masih dimatikan (dan terukur): `linear@openai-api-curated` (−18.537 tok/turn),
 Empat plugin dalam satu `foreach` bukan berarti empat plugin yang sama. Yang menyuntik tool
 surface adalah plugin yang mengiklankan **tool**, bukan yang menyediakan aset. Kalau tidak
 diukur satu-satu, yang dikorbankan bisa fitur yang gratis.
+
+## 24. Semua plugin aktif; deferral tidak bisa dinyalakan dari config (2026-11-06)
+
+Keputusan pemilik: **semua plugin aktif**, dan idealnya idle-nya gratis — "aktif ketika
+kupanggil saja".
+
+### Yang dicoba untuk idle-gratis
+
+Binary Codex punya mekanismenya, terbaca di `strings`:
+
+```
+tool_search   tool_search_always_defer_mcp_tools   deferred_tool_world_state
+DynamicToolSpec.deferLoading
+"Some deferred nested tools may be omitted from this description. They are still
+ available on the global `tools` object and listed in `ALL_TOOLS`."
+```
+
+Dicoba di dua tempat:
+
+| bentuk | hasil |
+| --- | --- |
+| `[features] tool_search/tool_search_always_defer_mcp_tools/deferred_tool_world_state` | flag diterima (warning under-development), tapi efeknya **tidak konsisten**: 1 run deferral jalan (linear hilang dari deskripsi `exec`, 19.121 token), 4 run berikutnya inline lagi (39,7k). Tidak ada tool `tool_search` di daftar tool. |
+| `[tools] tool_search/...` | **ditolak**: "Codex is ignoring 5 unrecognized configuration settings" |
+
+Kesimpulan jujur: **deferral tidak bisa dinyalakan dari config di build ini.** Mekanismenya
+ada, tapi tidak terekspos sebagai knob yang stabil. Jadi idle-gratis untuk MCP belum
+tersedia; yang tersisa hanya aturan perilaku.
+
+### Yang diterapkan
+
+- Launcher **tidak lagi mematikan plugin apa pun**. `Set-ClonePluginDisabled` dihapus (tidak
+  terpakai), dan `chrome@openai-bundled` yang dulu dimatikan karena kunci cache ikut aktif.
+- `app/tests/test-plugin-off.ps1` → `test-plugin-policy.ps1`: menuntut **tidak ada** disable
+  di launcher, dan menuntut `## Plugins and MCP` tetap ada di `clone-AGENTS.md` (satu-satunya
+  tuas yang tersisa).
+- `clone-AGENTS.md` tetap berlaku: jangan panggil `mcp__*` spekulatif, jangan buka plugin yang
+  tidak disebut, shell dulu.
+
+### Ongkos yang harus diterima
+
+| kondisi | token per turn (`say`) |
+| --- | --- |
+| semua plugin aktif, linear inline | **~39.800** |
+| linear mati (kondisi sebelumnya) | ~18.000 |
+
+Selisih ~21.800 token **per turn, selamanya**, karena 60+ tool Linear masuk ke deskripsi
+`exec`. Konsekuensi langsung dari "semua aktif"; dicatat supaya bukan kejutan nanti.
+
+Catatan yang mungkin muncul lagi: `chrome@openai-bundled` aktif membuat extension-host memegang
+`plugins\cache\openai-bundled\chrome\latest`, dan app bisa melaporkan
+`failed to back up plugin cache entry: Access is denied. (os error 5)` saat start. Itu
+peringatan kosmetik, bukan kegagalan launch.
